@@ -16,6 +16,8 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_ADAPTIVE_FRESHNESS,
+    CONF_ADAPTIVE_HARD_TIMEOUT,
     CONF_BACKGROUND_LOADS,
     CONF_BATTERY_CHARGE,
     CONF_BATTERY_DISCHARGE,
@@ -24,6 +26,9 @@ from .const import (
     CONF_GENERATORS,
     CONF_GRID_EXPORT,
     CONF_GRID_IMPORT,
+    CONF_GRID_TARIFFS,
+    CONF_BATTERY_TARIFFS,
+    CONF_CURRENCY,
     CONF_GROUPS,
     CONF_HOUR_RETENTION_DAYS,
     CONF_HOUSE_NET,
@@ -35,6 +40,9 @@ from .const import (
     CONF_SYNC_BUFFER,
     CONF_SYNC_MAX_SAMPLE_AGE,
     DEFAULT_GENERATOR_MAX_AGE,
+    ENERGY_MODE_AUTO,
+    GENERATOR_FALLBACK_POLARITY_SAME,
+    GENERATOR_POLARITY_POSITIVE,
     DEFAULTS,
     DOMAIN,
     GENERATOR_ROLE_MAIN_BUS,
@@ -78,9 +86,13 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "battery_pair_required"
             elif user_input.get(CONF_BATTERY_CHARGE) and not (user_input.get(FIELD_INITIAL_PV) or []):
                 errors["base"] = "battery_requires_generator"
-            elif bool(user_input.get(CONF_SYNC_ENABLED, DEFAULTS[CONF_SYNC_ENABLED])) and float(user_input.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER])) < (
-                float(user_input.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY]))
-                + float(user_input.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE]))
+            elif (
+                bool(user_input.get(CONF_SYNC_ENABLED, DEFAULTS[CONF_SYNC_ENABLED]))
+                and not bool(user_input.get(CONF_ADAPTIVE_FRESHNESS, DEFAULTS[CONF_ADAPTIVE_FRESHNESS]))
+                and float(user_input.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER])) < (
+                    float(user_input.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY]))
+                    + float(user_input.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE]))
+                )
             ):
                 errors["base"] = "sync_buffer_too_small"
             else:
@@ -107,6 +119,8 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                         "enabled": True,
                         "icon": "mdi:flash",
                         "description": "",
+                        "energy_entity_id": None,
+                        "energy_mode": ENERGY_MODE_AUTO,
                     }
                 ]
 
@@ -123,6 +137,8 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                             "id": new_generator_id(entity_id),
                             "entity_id": entity_id,
                             "fallback_entity_id": None,
+                            "polarity": GENERATOR_POLARITY_POSITIVE,
+                            "fallback_polarity": GENERATOR_FALLBACK_POLARITY_SAME,
                             "name": name,
                             "role": GENERATOR_ROLE_MAIN_BUS,
                             "consumer_id": None,
@@ -131,6 +147,9 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                             "max_age": float(DEFAULT_GENERATOR_MAX_AGE),
                             "icon": "mdi:solar-power",
                             "description": "",
+                            "energy_entity_id": None,
+                            "energy_mode": ENERGY_MODE_AUTO,
+                            "tariffs": [],
                         }
                     )
 
@@ -150,6 +169,11 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_SYNC_DELAY: float(user_input.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY])),
                     CONF_SYNC_BUFFER: float(user_input.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER])),
                     CONF_SYNC_MAX_SAMPLE_AGE: float(user_input.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE])),
+                    CONF_ADAPTIVE_FRESHNESS: bool(user_input.get(CONF_ADAPTIVE_FRESHNESS, DEFAULTS[CONF_ADAPTIVE_FRESHNESS])),
+                    CONF_ADAPTIVE_HARD_TIMEOUT: float(user_input.get(CONF_ADAPTIVE_HARD_TIMEOUT, DEFAULTS[CONF_ADAPTIVE_HARD_TIMEOUT])),
+                    CONF_GRID_TARIFFS: [],
+                    CONF_BATTERY_TARIFFS: [],
+                    CONF_CURRENCY: "EUR",
                     CONF_CONSUMERS: consumers,
                     CONF_GROUPS: [],
                     CONF_GENERATORS: generators,
@@ -178,6 +202,8 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_SYNC_DELAY, default=DEFAULTS[CONF_SYNC_DELAY]): _number(0, 30, 0.5),
                 vol.Required(CONF_SYNC_BUFFER, default=DEFAULTS[CONF_SYNC_BUFFER]): _number(10, 300, 1),
                 vol.Required(CONF_SYNC_MAX_SAMPLE_AGE, default=DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE]): _number(2, 120, 1),
+                vol.Required(CONF_ADAPTIVE_FRESHNESS, default=DEFAULTS[CONF_ADAPTIVE_FRESHNESS]): bool,
+                vol.Required(CONF_ADAPTIVE_HARD_TIMEOUT, default=DEFAULTS[CONF_ADAPTIVE_HARD_TIMEOUT]): _number(15, 600, 1),
             }
         )
 

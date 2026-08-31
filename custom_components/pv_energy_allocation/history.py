@@ -34,6 +34,7 @@ def _empty_record(start_ms: int, duration: int, consumer_ids) -> dict[str, Any]:
             cid: {source: 0.0 for source in SOURCES}
             for cid in consumer_ids
         },
+        "pv_by_generator_kwh": {cid: {} for cid in consumer_ids},
     }
 
 
@@ -75,11 +76,11 @@ async def async_get_history(
     if archived:
         merged = {int(rec["start"]): rec for rec in archived}
         # For overlapping intervals prefer the record with the better data
-        # coverage. This matters after a degraded/invalid live interval: native
-        # quarter sensors may legitimately contain a 0 kWh / 0 % coverage row,
-        # while a later Recorder backfill can reconstruct the same interval with
-        # much better coverage. Native data still wins when coverage is equal or
-        # better, so verified live measurements remain authoritative.
+        # coverage. A newly executed manual backfill is additionally marked as
+        # `corrective`: it uses the current WattWer configuration and may therefore
+        # intentionally repair an older live interval after e.g. a PV polarity or
+        # topology correction. In that case the corrective backfill wins when its
+        # coverage is at least as good as the native interval.
         for rec in records:
             key = int(rec["start"])
             existing = merged.get(key)
@@ -89,9 +90,18 @@ async def async_get_history(
                 if existing is not None
                 else -1.0
             )
-            if existing is None or native_coverage >= archived_coverage:
+            corrective = bool(existing and existing.get("corrective", False))
+            if existing is None:
+                merged[key] = rec
+            elif corrective and archived_coverage >= native_coverage:
+                # Keep the explicit repair.
+                pass
+            elif native_coverage >= archived_coverage:
                 merged[key] = rec
         records = [merged[key] for key in sorted(merged)]
+
+    for rec in records:
+        controller.decorate_record_costs(rec)
 
     return {
         "resolution": resolution,
@@ -116,14 +126,22 @@ async def _async_recent_quarters(
     end_ms: int,
 ) -> list[dict[str, Any]]:
     mapping: dict[str, tuple[str, str]] = {}
+    pv_generator_mapping: dict[str, tuple[str, str]] = {}
     sources = ["total", "pv", "grid"] + (["battery"] if controller.battery_visible else [])
     for cid in controller.all_consumers:
         for source in sources:
             uid = _energy_unique(controller.entry.entry_id, cid, source, "last_15m")
             if eid := _entity_id(hass, uid):
                 mapping[eid] = (cid, source)
-    if not mapping:
+    for cid in controller.all_consumers:
+        for gid in controller.all_generators:
+            uid = f"{controller.entry.entry_id}_{cid}_pv_generator_{gid}_energy_last_15m"
+            if eid := _entity_id(hass, uid):
+                pv_generator_mapping[eid] = (cid, gid)
+    if not mapping and not pv_generator_mapping:
         return []
+
+    mapping.update({eid: ("__pvgen__", eid) for eid in pv_generator_mapping})
 
     start_dt = datetime.fromtimestamp(start_ms / 1000, UTC)
     end_dt = datetime.fromtimestamp(end_ms / 1000, UTC)
@@ -145,7 +163,11 @@ async def _async_recent_quarters(
         target = mapping.get(eid)
         if target is None:
             continue
-        cid, source = target
+        is_pvgen = target[0] == "__pvgen__"
+        if is_pvgen:
+            cid, gid = pv_generator_mapping[eid]
+        else:
+            cid, source = target
         for state in states:
             if not isinstance(state, State):
                 # LazyState implements the same properties but is not guaranteed
@@ -161,7 +183,10 @@ async def _async_recent_quarters(
                 continue
             duration = max(1, int(round((window_end - window_start) / 1000)))
             rec = grouped.setdefault(window_start, _empty_record(window_start, duration, controller.all_consumers))
-            rec["values"][cid][source] = max(0.0, value)
+            if is_pvgen:
+                rec.setdefault("pv_by_generator_kwh", {}).setdefault(cid, {})[gid] = max(0.0, value)
+            else:
+                rec["values"][cid][source] = max(0.0, value)
             try:
                 rec["coverage"] = max(
                     rec["coverage"],
@@ -181,6 +206,7 @@ async def _async_statistics(
     period: str,
 ) -> list[dict[str, Any]]:
     mapping: dict[str, tuple[str, str]] = {}
+    pv_generator_mapping: dict[str, tuple[str, str]] = {}
     sources = ["total", "pv", "grid"] + (["battery"] if controller.battery_visible else [])
     for cid in controller.all_consumers:
         for source in sources:
@@ -188,8 +214,14 @@ async def _async_statistics(
             if eid := _entity_id(hass, uid):
                 mapping[eid] = (cid, source)
 
+    for cid in controller.all_consumers:
+        for gid in controller.all_generators:
+            uid = f"{controller.entry.entry_id}_{cid}_pv_generator_{gid}_energy_lifetime"
+            if eid := _entity_id(hass, uid):
+                pv_generator_mapping[eid] = (cid, gid)
+
     coverage_eid = _entity_id(hass, f"{controller.entry.entry_id}_coverage_lifetime")
-    statistic_ids = set(mapping)
+    statistic_ids = set(mapping) | set(pv_generator_mapping)
     if coverage_eid:
         statistic_ids.add(coverage_eid)
     if not statistic_ids:
@@ -227,5 +259,8 @@ async def _async_statistics(
             elif eid in mapping:
                 cid, source = mapping[eid]
                 rec["values"][cid][source] = max(0.0, change_f)
+            elif eid in pv_generator_mapping:
+                cid, gid = pv_generator_mapping[eid]
+                rec.setdefault("pv_by_generator_kwh", {}).setdefault(cid, {})[gid] = max(0.0, change_f)
 
     return [grouped[key] for key in sorted(grouped)]

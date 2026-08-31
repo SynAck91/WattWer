@@ -16,6 +16,10 @@ class PVEnergyAllocationPanel extends HTMLElement {
     this._management = null;
     this._backfillStatus = null;
     this._storageStats = null;
+    this._sensorTimingOpen = localStorage.getItem("wattwer.sensorTimingOpen") === "1";
+    this._energyMeterOpen = localStorage.getItem("wattwer.energyMeterOpen") === "1";
+    this._generatorEnergyMeterOpen = localStorage.getItem("wattwer.generatorEnergyMeterOpen") === "1";
+    this._storageStatsOpen = localStorage.getItem("wattwer.storageStatsOpen") === "1";
   }
 
   set hass(value) {
@@ -268,6 +272,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
 
   _resolutionLabel(r) { return r === "15m" ? "15 Minuten" : r === "hour" ? "Stunden" : "Tage"; }
   _blank(consumers) { const o={}; Object.keys(consumers).forEach(c=>o[c]={total:0,pv:0,grid:0,battery:0}); return o; }
+  _blankCosts(consumers) { const o={}; Object.keys(consumers).forEach(c=>o[c]={total:0,grid:0,pv:0,battery:0,priced_kwh:0,unpriced_kwh:0}); return o; }
 
   _displayItems(history) {
     const consumers = history.consumers || {};
@@ -292,8 +297,21 @@ class PVEnergyAllocationPanel extends HTMLElement {
     return out;
   }
 
+  _sumMemberCosts(costs, members) {
+    const out={total:0,grid:0,pv:0,battery:0,priced_kwh:0,unpriced_kwh:0,coverage:1,complete:true};
+    for (const cid of members) {
+      const row=costs?.[cid]||{};
+      ["total","grid","pv","battery","priced_kwh","unpriced_kwh"].forEach(k=>out[k]+=Number(row[k]||0));
+    }
+    const energy=out.priced_kwh+out.unpriced_kwh;
+    out.coverage=energy>1e-12?Math.min(1,Math.max(0,out.priced_kwh/energy)):1;
+    out.complete=out.unpriced_kwh<=1e-9;
+    return out;
+  }
+
   _renderData(history, summary, start, end, todayHistory=null) {
     const totals = this._blank(history.consumers);
+    const costTotals = this._blankCosts(history.consumers);
     let covered = 0, duration = 0;
     const todayStart = summary.today_start;
     const now = Date.now();
@@ -309,6 +327,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
         continue;
       }
       this._addValues(totals, rec.values);
+      this._addCosts(costTotals, rec.costs);
       covered += rec.coverage * rec.duration;
       duration += rec.duration;
       chartRecords.push(rec);
@@ -317,6 +336,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
       const todayRecords = todayHistory?.records || [];
       for (const rec of todayRecords) {
         this._addValues(totals, rec.values);
+        this._addCosts(costTotals, rec.costs);
         covered += Number(rec.coverage || 0) * Number(rec.duration || 0);
         duration += Number(rec.duration || 0);
       }
@@ -328,6 +348,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
         const partialDuration = Math.max(1, (Math.min(end.getTime(), now) - Math.max(start.getTime(), partialStart))/1000);
         if (partialDuration > 0 && partialStart < end.getTime()) {
           this._addValues(totals, summary.current_15m.values);
+          this._addCosts(costTotals, summary.current_15m.costs);
           const partialCoverage = Math.min(1, Number(summary.current_15m.coverage_seconds || 0) / Math.max(1, (now-partialStart)/1000));
           covered += partialCoverage * partialDuration;
           duration += partialDuration;
@@ -337,6 +358,8 @@ class PVEnergyAllocationPanel extends HTMLElement {
               duration:partialDuration,
               coverage:partialCoverage,
               values:summary.current_15m.values,
+              costs:summary.current_15m.costs||{},
+              currency:summary.current_15m.currency||summary.pricing?.currency||"EUR",
               partial:true
             });
           }
@@ -345,7 +368,8 @@ class PVEnergyAllocationPanel extends HTMLElement {
     }
     const coveragePct = duration > 0 ? covered/duration*100 : 0;
     const items = this._displayItems(history);
-    const cards = items.map(item => this._summaryCard(item.label, this._sumMembers(totals,item.members), summary.battery_visible, item.group)).join("");
+    const currency=summary.pricing?.currency||"EUR";
+    const cards = items.map(item => this._summaryCard(item.label, this._sumMembers(totals,item.members), this._sumMemberCosts(costTotals,item.members), summary.battery_visible, item.group, currency)).join("");
     const consumerOptions = items.map(item => `<option value="${this._escapeAttr(item.id)}" ${item.id===this._selectedDisplay?"selected":""}>${this._escape(item.label)}${item.group?" (Gruppe)":""}</option>`).join("");
     const selected = items.find(x => x.id === this._selectedDisplay) || items[0];
     const live = summary.live || {};
@@ -354,10 +378,11 @@ class PVEnergyAllocationPanel extends HTMLElement {
       fallback_generator: "gültig · Erzeuger-Fallback",
       fallback_night_zero: "gültig · Nacht-Fallback",
       degraded_generator_proportional: "gültig · proportionaler Erzeuger-Fallback",
+      delayed_sensor: "gültig · Sensor verzögert",
       invalid: "ungültig",
     };
     const liveQuality = live.valid ? (qualityLabels[live.quality] || "gültig") : "ungültig";
-    const syncLabels={excellent:"sehr gut",good:"gut",fair:"mäßig",poor:"schlecht",warming_up:"läuft an",disabled:"aus"};
+    const syncLabels={excellent:"sehr gut",good:"gut",fair:"verzögert",poor:"schlecht",warming_up:"lernt",disabled:"aus"};
     const syncQuality=syncLabels[live.sync_quality]||String(live.sync_quality||"–");
     const last15=summary.last_15m||{};
 
@@ -374,7 +399,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
         <div class="card side">
           <h3>Datenqualität</h3>
           <div class="diag">
-            ${this._diagRow("Auswahl-Abdeckung", `${coveragePct.toFixed(1)} %`)}
+            ${this._diagRow("Auswahl-Abdeckung", this._formatNumber(coveragePct,1,1)+" %")}
             ${this._diagRow("Live-Snapshot", liveQuality)}
             ${this._diagRow("Netzanteil live", this._pct(live.grid_fraction))}
             ${this._diagRow("PV-Anteil live", this._pct(live.pv_fraction))}
@@ -393,13 +418,58 @@ class PVEnergyAllocationPanel extends HTMLElement {
           </div>
           ${live.quality_notes?.length ? `<p class="muted">${live.quality_notes.map(x=>this._escape(x)).join(" · ")}</p>`:""}
           ${!live.valid && live.stale_entities?.length ? `<p class="muted">Ungültig/veraltet: ${live.stale_entities.map(x=>this._escape(x)).join(", ")}</p>`:""}
+          ${this._sensorTimingPanel(live.sensor_timing||{})}
+          ${this._energyMeterPanel(last15.energy_meter||{}, summary.consumer_metadata||{})}
+          ${this._generatorEnergyMeterPanel(last15.generator_energy_meter||{}, summary.generators||{})}
         </div>
       </div>
       ${this._storageStats ? this._storagePanel(this._storageStats) : ""}`;
 
     const selector = this.shadowRoot.getElementById("consumerSelect");
     if (selector) selector.addEventListener("change", e => { this._selectedDisplay=e.target.value; this._renderCurrent(); });
+    const timingDetails = this.shadowRoot.getElementById("sensorTimingDetails");
+    if (timingDetails) timingDetails.addEventListener("toggle", () => {
+      this._sensorTimingOpen = timingDetails.open;
+      localStorage.setItem("wattwer.sensorTimingOpen", timingDetails.open ? "1" : "0");
+    });
+    const energyDetails = this.shadowRoot.getElementById("energyMeterDetails");
+    if (energyDetails) energyDetails.addEventListener("toggle", () => {
+      this._energyMeterOpen = energyDetails.open;
+      localStorage.setItem("wattwer.energyMeterOpen", energyDetails.open ? "1" : "0");
+    });
+    const generatorEnergyDetails = this.shadowRoot.getElementById("generatorEnergyMeterDetails");
+    if (generatorEnergyDetails) generatorEnergyDetails.addEventListener("toggle", () => {
+      this._generatorEnergyMeterOpen = generatorEnergyDetails.open;
+      localStorage.setItem("wattwer.generatorEnergyMeterOpen", generatorEnergyDetails.open ? "1" : "0");
+    });
+    const storageDetails = this.shadowRoot.getElementById("storageStatsDetails");
+    if (storageDetails) storageDetails.addEventListener("toggle", () => {
+      this._storageStatsOpen = storageDetails.open;
+      localStorage.setItem("wattwer.storageStatsOpen", storageDetails.open ? "1" : "0");
+    });
     this._wireChartTooltip();
+  }
+
+  _sensorTimingPanel(timing) {
+    const rows=Object.values(timing||{});
+    if(!rows.length)return "";
+    const labels={normal:"ok",delayed:"verzögert",stale:"veraltet",missing:"fehlt",learning:"lernt",night_zero:"Nacht · 0 W"};
+    const sorted=rows.sort((a,b)=>{const rank={stale:0,missing:1,delayed:2,learning:3,normal:4,night_zero:5};return (rank[a.status]??9)-(rank[b.status]??9)||String(a.entity_id).localeCompare(String(b.entity_id));});
+    return `<details id="sensorTimingDetails" ${this._sensorTimingOpen?"open":""} style="margin-top:14px"><summary style="cursor:pointer;font-weight:650">Sensor-Timing (${rows.length})</summary><div style="margin-top:8px">${sorted.map(x=>{const typical=x.typical_interval_s==null?"–":this._seconds(x.typical_interval_s);const age=x.age_s==null?"–":this._seconds(x.age_s);const warn=x.warn_after_s==null?"–":this._seconds(x.warn_after_s);const hard=x.hard_timeout_s==null?"–":this._seconds(x.hard_timeout_s);return `<div style="padding:8px 0;border-top:1px solid var(--divider-color);font-size:11px"><div style="display:flex;justify-content:space-between;gap:8px"><strong style="overflow-wrap:anywhere">${this._escape(x.entity_id||"")}</strong><span>${this._escape(labels[x.status]||x.status||"–")}</span></div><div class="muted" style="margin:3px 0 0">typisch ${typical} · aktuell ${age} · Warnung ${warn} · Timeout ${hard} · ${Number(x.sample_count||0)} Lernwerte</div></div>`;}).join("")}</div></details>`;
+  }
+
+  _energyMeterPanel(meters, metadata) {
+    const rows=Object.entries(meters||{});
+    if(!rows.length)return "";
+    const labels={energy_meter:"kWh-Zähler",power_fallback:"Leistungsintegration"};
+    return `<details id="energyMeterDetails" ${this._energyMeterOpen?"open":""} style="margin-top:14px"><summary style="cursor:pointer;font-weight:650">Energiezähler (${rows.length})</summary><div style="margin-top:8px">${rows.map(([cid,m])=>{const name=metadata?.[cid]?.name||cid;const meter=m.meter_delta_kwh==null?"–":`${this._formatNumber(Number(m.meter_delta_kwh),4,4)} kWh`;const power=m.power_integrated_kwh==null?"–":`${this._formatNumber(Number(m.power_integrated_kwh),4,4)} kWh`;const dev=m.deviation_percent==null?"–":`${Number(m.deviation_percent)>=0?"+":""}${this._formatNumber(Number(m.deviation_percent),2,2)} %`;const status=labels[m.status]||m.status||"–";const reason=m.reason?` · Fallback: ${this._escape(m.reason)}`:"";return `<div style="padding:8px 0;border-top:1px solid var(--divider-color);font-size:11px"><div style="display:flex;justify-content:space-between;gap:8px"><strong>${this._escape(name)}</strong><span>${this._escape(status)}</span></div><div class="muted" style="margin:3px 0 0">Zähler ${meter} · Integration ${power} · Δ ${dev}${reason}</div></div>`;}).join("")}</div></details>`;
+  }
+
+  _generatorEnergyMeterPanel(meters, metadata) {
+    const rows=Object.entries(meters||{});
+    if(!rows.length)return "";
+    const labels={energy_meter:"kWh-Zähler",power_fallback:"Leistungsintegration"};
+    return `<details id="generatorEnergyMeterDetails" ${this._generatorEnergyMeterOpen?"open":""} style="margin-top:14px"><summary style="cursor:pointer;font-weight:650">PV-Energiezähler (${rows.length})</summary><div style="margin-top:8px">${rows.map(([gid,m])=>{const meta=metadata?.[gid]||{};const name=meta.name||gid;const meter=m.meter_delta_kwh==null?"–":`${this._formatNumber(Number(m.meter_delta_kwh),4,4)} kWh`;const power=m.power_integrated_kwh==null?"–":`${this._formatNumber(Number(m.power_integrated_kwh),4,4)} kWh`;const effective=m.effective_generation_kwh==null?"–":`${this._formatNumber(Number(m.effective_generation_kwh),4,4)} kWh`;const dev=m.deviation_percent==null?"–":`${Number(m.deviation_percent)>=0?"+":""}${this._formatNumber(Number(m.deviation_percent),2,2)} %`;const status=labels[m.status]||m.status||"–";const reason=m.reason?` · Fallback: ${this._escape(m.reason)}`:"";return `<div style="padding:8px 0;border-top:1px solid var(--divider-color);font-size:11px"><div style="display:flex;justify-content:space-between;gap:8px"><strong>${this._escape(name)}</strong><span>${this._escape(status)}</span></div><div class="muted" style="margin:3px 0 0">Zähler ${meter} · Leistungsintegration ${power} · verwendet ${effective} · Δ ${dev}${reason}</div></div>`;}).join("")}</div></details>`;
   }
 
   _storagePanel(stats) {
@@ -409,11 +479,12 @@ class PVEnergyAllocationPanel extends HTMLElement {
     const saveEvery=Math.max(1,Number(stats.storage_save_interval_seconds||300)/60);
     const writeUpper=Number(stats.estimated_runtime_write_bytes_per_day_upper||0);
     const fmtOldest=(value)=>value?this._dateOnly(value):"–";
-    return `<div class="card storagecard">
-      <div class="storagehead"><div><h3>Speicher & Statistik</h3><div class="muted">WattWer persistiert keine 5-Sekunden-Zwischensamples. Angezeigt werden die tatsächlichen WattWer-Dateigrößen und konservative Obergrenzen.</div></div></div>
+    return `<details id="storageStatsDetails" class="card storagecard" ${this._storageStatsOpen?"open":""}>
+      <summary style="cursor:pointer;font-weight:650;font-size:16px">Speicher & Statistik</summary>
+      <div class="muted" style="margin:8px 0 14px">WattWer persistiert keine 5-Sekunden-Zwischensamples. Angezeigt werden die tatsächlichen WattWer-Dateigrößen und konservative Obergrenzen.</div>
       <div class="storagegrid">
         <div class="storagebox"><div class="kicker">WattWer .storage gesamt</div><div class="big">${this._bytes(stats.total_storage_bytes)}</div><div class="small">Runtime ${this._bytes(stats.runtime_storage_bytes)} · Backfill ${this._bytes(stats.backfill_storage_bytes)}</div></div>
-        <div class="storagebox"><div class="kicker">Persistenz-Intervall</div><div class="big">${saveEvery.toFixed(saveEvery%1?1:0)} min</div><div class="small">Zusätzlich sofort nach jeder abgeschlossenen Viertelstunde und beim Herunterfahren. Max. ~${Number(stats.max_runtime_saves_per_day||0)} Runtime-Saves/Tag.</div></div>
+        <div class="storagebox"><div class="kicker">Persistenz-Intervall</div><div class="big">${this._formatNumber(saveEvery,saveEvery%1?1:0,saveEvery%1?1:0)} min</div><div class="small">Zusätzlich sofort nach jeder abgeschlossenen Viertelstunde und beim Herunterfahren. Max. ~${Number(stats.max_runtime_saves_per_day||0)} Runtime-Saves/Tag.</div></div>
         <div class="storagebox"><div class="kicker">Logisches Runtime-Schreibvolumen</div><div class="big">≤ ${this._bytes(writeUpper)}/Tag</div><div class="small">Konservative Obergrenze aus aktueller Runtime-Dateigröße × maximalen Saves. Dateisystem-/SQLite-Overhead nicht enthalten.</div></div>
         <div class="storagebox"><div class="kicker">Home Assistant Recorder</div><div class="big">${retention}</div><div class="small">Normale State-Historie. Long-Term Statistics bleiben von der normalen Purge-Retention getrennt.</div></div>
         <div class="storagebox"><div class="kicker">WattWer Entitäten</div><div class="big">${Number(stats.entity_count||0)}</div><div class="small">${Number(stats.consumer_count||0)} Verbraucher (${Number(stats.active_consumer_count||0)} aktiv) · ca. ${Number(stats.lts_series_count||0)} Long-Term-Statistics-Serien.</div></div>
@@ -422,7 +493,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
         <div class="storagebox"><div class="kicker">Backfill Stunden</div><div class="big">${Number(counts.hour||0)} Stunden</div><div class="small">Ältester Datensatz ${fmtOldest(oldest.hour)} · Aufbewahrung ${Number(stats.hour_retention_days||0)} Tage.</div></div>
         <div class="storagebox"><div class="kicker">Backfill Tage</div><div class="big">${Number(counts.day||0)} Tage</div><div class="small">Ältester Datensatz ${fmtOldest(oldest.day)} · Tagesaggregate werden dauerhaft im WattWer-Backfill-Archiv gehalten.</div></div>
       </div>
-    </div>`;
+    </details>`;
   }
 
   _addValues(target, values) {
@@ -432,34 +503,50 @@ class PVEnergyAllocationPanel extends HTMLElement {
     });
   }
 
-  _summaryCard(label,v,batteryEnabled,isGroup=false) {
-    const total = v.total || 0;
-    const pv = total > 0 ? v.pv/total*100 : 0;
-    const grid = total > 0 ? v.grid/total*100 : 0;
-    const battery = total > 0 ? v.battery/total*100 : 0;
+  _addCosts(target, costs) {
+    Object.keys(target).forEach(cid => {
+      if (!costs?.[cid]) return;
+      ["total","grid","pv","battery","priced_kwh","unpriced_kwh"].forEach(k => target[cid][k] += Number(costs[cid][k] || 0));
+    });
+  }
+
+  _summaryCard(label,v,cost,batteryEnabled,isGroup=false,currency="EUR") {
+    const total = Number(v.total || 0);
+    const pv = total > 0 ? Number(v.pv||0)/total*100 : 0;
+    const grid = total > 0 ? Number(v.grid||0)/total*100 : 0;
+    const battery = total > 0 ? Number(v.battery||0)/total*100 : 0;
+    const costCoverage=Math.max(0,Math.min(1,Number(cost?.coverage??1)));
+    const costKnown=Number(cost?.priced_kwh||0)>1e-12 || (total<=1e-12 && costCoverage>=.999999);
+    const costText=costKnown?this._currency(Number(cost?.total||0),currency):"–";
+    const costHint=total>1e-12 && costCoverage<.999999?` · ${this._formatNumber(costCoverage*100,1,1)} % bepreist`:"";
+    const sourceCostLine=costKnown
+      ? `<div class="muted" style="margin-top:4px;font-size:11px">PV ${this._currency(Number(cost?.pv||0),currency)} · Netz ${this._currency(Number(cost?.grid||0),currency)}${batteryEnabled ? ` · Batterie ${this._currency(Number(cost?.battery||0),currency)}` : ""}</div>`
+      : `<div class="muted" style="margin-top:4px;font-size:11px">Keine vollständige Tarifzuordnung vorhanden.</div>`;
     return `<div class="card summary">
       <h3>${this._escape(label)}${isGroup?' <span class="muted">· Gruppe</span>':''}</h3>
       <div class="total">${this._energy(total)}</div>
       <div class="sources">
-        <div class="metric"><div class="label">PV</div><div class="value">${this._energy(v.pv)} · ${pv.toFixed(1)}%</div></div>
-        <div class="metric"><div class="label">Netz</div><div class="value">${this._energy(v.grid)} · ${grid.toFixed(1)}%</div></div>
-        ${batteryEnabled?`<div class="metric"><div class="label">Batterie</div><div class="value">${this._energy(v.battery)} · ${battery.toFixed(1)}%</div></div>`:""}
+        <div class="metric"><div class="label">PV</div><div class="value">${this._energy(v.pv)} · ${this._formatNumber(pv,1,1)}%</div></div>
+        <div class="metric"><div class="label">Netz</div><div class="value">${this._energy(v.grid)} · ${this._formatNumber(grid,1,1)}%</div></div>
+        ${batteryEnabled?`<div class="metric"><div class="label">Batterie</div><div class="value">${this._energy(v.battery)} · ${this._formatNumber(battery,1,1)}%</div></div>`:""}
       </div>
       <div class="bar"><span class="pv" style="width:${pv}%"></span><span class="gridc" style="width:${grid}%"></span>${batteryEnabled?`<span class="battery" style="width:${battery}%"></span>`:""}</div>
+      <div class="metric" style="margin-top:10px"><div class="label">Kosten${costHint}</div><div class="value">${costText}</div>${sourceCostLine}</div>
     </div>`;
   }
 
   _chart(records,item,resolution,batteryEnabled) {
     if (!records.length) return `<div class="loading">Für diesen Zeitraum sind noch keine Daten vorhanden.</div>`;
-    const normalize = r => ({...r, display:this._sumMembers(r.values,item.members)});
+    const normalize = r => ({...r, display:this._sumMembers(r.values,item.members), displayCost:this._sumMemberCosts(r.costs,item.members)});
     let points = records.map(normalize);
     const maxBars = 480;
     if (points.length > maxBars) {
       const group = Math.ceil(points.length/maxBars); const sampled=[];
       for (let i=0;i<points.length;i+=group) {
-        const slice=points.slice(i,i+group); const v={total:0,pv:0,grid:0,battery:0}; let dur=0,cov=0;
-        slice.forEach(r=>{["total","pv","grid","battery"].forEach(src=>v[src]+=Number(r.display[src]||0));dur+=r.duration;cov+=r.coverage*r.duration;});
-        sampled.push({start:slice[0].start,duration:dur,coverage:dur?cov/dur:0,display:v,sampled:true});
+        const slice=points.slice(i,i+group); const v={total:0,pv:0,grid:0,battery:0}; const c={total:0,grid:0,pv:0,battery:0,priced_kwh:0,unpriced_kwh:0}; let dur=0,cov=0;
+        slice.forEach(r=>{["total","pv","grid","battery"].forEach(src=>v[src]+=Number(r.display[src]||0));["total","grid","pv","battery","priced_kwh","unpriced_kwh"].forEach(k=>c[k]+=Number(r.displayCost?.[k]||0));dur+=r.duration;cov+=r.coverage*r.duration;});
+        const ce=c.priced_kwh+c.unpriced_kwh;c.coverage=ce>1e-12?c.priced_kwh/ce:1;c.complete=c.unpriced_kwh<=1e-9;
+        sampled.push({start:slice[0].start,duration:dur,coverage:dur?cov/dur:0,display:v,displayCost:c,currency:slice[0].currency,sampled:true});
       }
       points=sampled;
     }
@@ -476,7 +563,8 @@ class PVEnergyAllocationPanel extends HTMLElement {
         if (h>0) seg.push(`<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" fill="${color}" rx="1"></rect>`);
       });
       const hitX=padL+i*step+step*.03, hitW=Math.max(1,step*.94);
-      const attrs=`data-chart-bar data-start="${Number(r.start)}" data-duration="${Number(r.duration||0)}" data-coverage="${Number(r.coverage||0)}" data-total="${total}" data-pv="${pv}" data-grid="${grid}" data-battery="${bat}" data-sampled="${r.sampled?1:0}"`;
+      const c=r.displayCost||{};const costEnergy=Number(c.priced_kwh||0)+Number(c.unpriced_kwh||0);const costCoverage=costEnergy>1e-12?Number(c.priced_kwh||0)/costEnergy:1;
+      const attrs=`data-chart-bar data-start="${Number(r.start)}" data-duration="${Number(r.duration||0)}" data-coverage="${Number(r.coverage||0)}" data-total="${total}" data-pv="${pv}" data-grid="${grid}" data-battery="${bat}" data-cost-total="${Number(c.total||0)}" data-cost-pv="${Number(c.pv||0)}" data-cost-grid="${Number(c.grid||0)}" data-cost-battery="${Number(c.battery||0)}" data-cost-coverage="${costCoverage}" data-currency="${this._escapeAttr(r.currency||this._lastView?.summary?.pricing?.currency||"EUR")}" data-sampled="${r.sampled?1:0}"`;
       return `<g>${seg.join("")}<rect class="barhit" x="${hitX.toFixed(2)}" y="${padT}" width="${hitW.toFixed(2)}" height="${innerH}" ${attrs}></rect></g>`;
     }).join("");
     let yLines=""; const ticks=5;
@@ -496,14 +584,17 @@ class PVEnergyAllocationPanel extends HTMLElement {
       if(!bar){hide();return;}
       const d=bar.dataset,start=Number(d.start||0),duration=Number(d.duration||0),coverage=Math.max(0,Math.min(1,Number(d.coverage||0)));
       const total=Number(d.total||0),pv=Number(d.pv||0),grid=Number(d.grid||0),battery=Number(d.battery||0);
-      const pct=v=>total>0?`${(v/total*100).toFixed(1)} %`:"0,0 %";
+      const costTotal=Number(d.costTotal||0),costPv=Number(d.costPv||0),costGrid=Number(d.costGrid||0),costBattery=Number(d.costBattery||0),costCoverage=Math.max(0,Math.min(1,Number(d.costCoverage||0))),currency=d.currency||"EUR";
+      const pct=v=>`${this._formatNumber(total>0?v/total*100:0,1,1)} %`;
       const end=start+duration*1000;
       const timeLabel=this._intervalLabel(start,end);
-      tip.innerHTML=`<div class="tttitle">${this._escape(timeLabel)}</div><div class="ttsub">Datenabdeckung ${(coverage*100).toFixed(1)} %${d.sampled==="1"?" · zusammengefasste Balken":""}</div>
+      tip.innerHTML=`<div class="tttitle">${this._escape(timeLabel)}</div><div class="ttsub">Datenabdeckung ${this._formatNumber(coverage*100,1,1)} %${d.sampled==="1"?" · zusammengefasste Balken":""}</div>
         <div class="ttrow"><span class="ttswatch pv"></span><span>PV</span><strong>${this._energy(pv)}</strong><span>${pct(pv)}</span></div>
         <div class="ttrow"><span class="ttswatch gridc"></span><span>Netz</span><strong>${this._energy(grid)}</strong><span>${pct(grid)}</span></div>
         ${battery>0?`<div class="ttrow"><span class="ttswatch battery"></span><span>Batterie</span><strong>${this._energy(battery)}</strong><span>${pct(battery)}</span></div>`:""}
-        <div class="tttotal"><span>Gesamt</span><span>${this._energy(total)}</span></div>`;
+        <div class="tttotal"><span>Gesamt</span><span>${this._energy(total)}</span></div>
+        <div class="tttotal"><span>Kosten${costCoverage<.999999?` · ${this._formatNumber(costCoverage*100,1,1)} % bepreist`:""}</span><span>${costCoverage>0||total<=1e-12?this._currency(costTotal,currency):"–"}</span></div>
+        ${costCoverage>0?`<div class="ttsub" style="margin:6px 0 0">PV ${this._currency(costPv,currency)} · Netz ${this._currency(costGrid,currency)}${battery>0?` · Batterie ${this._currency(costBattery,currency)}`:""}</div>`:""}`;
       const margin=12,tw=280,th=tip.offsetHeight||155;
       let left=e.clientX+14,top=e.clientY+14;
       if(left+tw>window.innerWidth-margin)left=e.clientX-tw-14;
@@ -665,7 +756,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
             ${this._diagRow("Archiv Stunden", String(this._backfillStatus.counts?.hour||0))}
             ${this._diagRow("Archiv Tage", String(this._backfillStatus.counts?.day||0))}
             ${this._diagRow("Konfigurationsrevisionen", String(this._backfillStatus.revision_count||0))}
-            ${last?this._diagRow("Letzter Backfill", `${this._dateTime(last.completed_at)} · ${(Number(last.coverage||0)*100).toFixed(1)} % Abdeckung`):""}
+            ${last?this._diagRow("Letzter Backfill", `${this._dateTime(last.completed_at)} · ${this._formatNumber(Number(last.coverage||0)*100,1,1)} % Abdeckung`):""}
           </div>
           <div id="bfProgress" class="progress" style="display:none"></div>
         </div>
@@ -689,10 +780,10 @@ class PVEnergyAllocationPanel extends HTMLElement {
         progress.textContent+=`\nBlock ${chunk}: ${new Date(cursor).toLocaleDateString()} – ${new Date(chunkEnd-1).toLocaleDateString()} …`;
         const result=await this._hass.callWS({type:"pv_energy_allocation/backfill/run",start:cursor,end:chunkEnd});
         const span=Math.max(1,(result.end-result.start)/1000); weighted+=Number(result.coverage||0)*span; seconds+=span;
-        progress.textContent+=` ${(Number(result.coverage||0)*100).toFixed(1)} % Abdeckung`;
+        progress.textContent+=` ${this._formatNumber(Number(result.coverage||0)*100,1,1)} % Abdeckung`;
         cursor=chunkEnd;
       }
-      progress.textContent+=`\nFertig. Gesamt-Abdeckung: ${(seconds?weighted/seconds*100:0).toFixed(1)} %`;
+      progress.textContent+=`\nFertig. Gesamt-Abdeckung: ${this._formatNumber(seconds?weighted/seconds*100:0,1,1)} %`;
       cancel.disabled=false; cancel.textContent="Schließen"; button.style.display="none";
       await this._refresh(false);
     }catch(err){progress.textContent+=`\nFEHLER: ${String(err?.message||err)}`;button.disabled=false;cancel.disabled=false;}
@@ -704,18 +795,22 @@ class PVEnergyAllocationPanel extends HTMLElement {
   _exportCsv() {
     if (!this._lastView) return;
     const {history,start,end}=this._lastView; const items=this._displayItems(history);
-    const rows=[["Start","Intervall_s","Abdeckung_%","Typ","Verbraucher","Gesamt_kWh","PV_kWh","PV_%","Netz_kWh","Netz_%","Batterie_kWh","Batterie_%"]];
-    for(const rec of history.records){for(const item of items){const v=this._sumMembers(rec.values,item.members);const total=Number(v.total||0),pv=Number(v.pv||0),grid=Number(v.grid||0),bat=Number(v.battery||0);const pct=x=>total>0?x/total*100:0;rows.push([new Date(rec.start).toISOString(),rec.duration,(rec.coverage*100).toFixed(2),item.group?"Gruppe":"Verbraucher",item.label,total.toFixed(6),pv.toFixed(6),pct(pv).toFixed(3),grid.toFixed(6),pct(grid).toFixed(3),bat.toFixed(6),pct(bat).toFixed(3)]);}}
+    const rows=[["Start","Intervall_s","Abdeckung_%","Typ","Verbraucher","Gesamt_kWh","PV_kWh","PV_%","Netz_kWh","Netz_%","Batterie_kWh","Batterie_%","Kosten_gesamt","Kosten_PV","Kosten_Netz","Kosten_Batterie","Kostenabdeckung_%","Waehrung"]];
+    const currency=this._lastView?.summary?.pricing?.currency||"EUR";
+    for(const rec of history.records){for(const item of items){const v=this._sumMembers(rec.values,item.members),c=this._sumMemberCosts(rec.costs,item.members);const total=Number(v.total||0),pv=Number(v.pv||0),grid=Number(v.grid||0),bat=Number(v.battery||0);const pct=x=>total>0?x/total*100:0;rows.push([new Date(rec.start).toISOString(),rec.duration,(rec.coverage*100).toFixed(2),item.group?"Gruppe":"Verbraucher",item.label,total.toFixed(6),pv.toFixed(6),pct(pv).toFixed(3),grid.toFixed(6),pct(grid).toFixed(3),bat.toFixed(6),pct(bat).toFixed(3),Number(c.total||0).toFixed(6),Number(c.pv||0).toFixed(6),Number(c.grid||0).toFixed(6),Number(c.battery||0).toFixed(6),(Number(c.coverage||0)*100).toFixed(3),currency]);}}
     const esc=v=>`"${String(v).replaceAll('"','""')}"`; const csv=rows.map(r=>r.map(esc).join(';')).join('\n'); const blob=new Blob(["\ufeff"+csv],{type:"text/csv;charset=utf-8"}); const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`pv-verteilung_${this._localDateString(start)}_${this._localDateString(new Date(end.getTime()-86400000))}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
   }
 
   _diagRow(label,value){return `<div class="diagrow"><span class="muted">${label}</span><strong>${value}</strong></div>`;}
-  _pct(v){return v==null?"–":`${(Number(v)*100).toFixed(1)} %`;}
-  _w(v){return v==null?"–":`${Number(v).toFixed(1)} W`;}
-  _seconds(v){return v==null?"–":`${Number(v).toFixed(Number(v)<10?2:1)} s`;}
-  _energy(kwh){kwh=Number(kwh||0);return kwh<1?`${(kwh*1000).toFixed(kwh<.1?1:0)} Wh`:`${kwh.toFixed(kwh<10?3:2)} kWh`;}
-  _energyShort(kwh){kwh=Number(kwh||0);return kwh<1?`${Math.round(kwh*1000)}Wh`:`${kwh.toFixed(1)}kWh`;}
-  _bytes(value){const n=Math.max(0,Number(value||0));if(n<1024)return `${Math.round(n)} B`;if(n<1048576)return `${(n/1024).toFixed(n<10240?1:0)} KB`;if(n<1073741824)return `${(n/1048576).toFixed(n<10485760?1:0)} MB`;return `${(n/1073741824).toFixed(2)} GB`;}
+  _numberFormat(){return localStorage.getItem("wattwer.numberFormat")||"de-DE";}
+  _formatNumber(value,min=0,max=2){const mode=this._numberFormat();const locale=mode==="en-US"?"en-US":"de-DE";return new Intl.NumberFormat(locale,{minimumFractionDigits:min,maximumFractionDigits:max,useGrouping:mode!=="de-plain"}).format(Number(value||0));}
+  _currency(value,currency="EUR"){const mode=this._numberFormat(),locale=mode==="en-US"?"en-US":"de-DE",n=Number(value||0);try{return new Intl.NumberFormat(locale,{style:"currency",currency:String(currency||"EUR").toUpperCase(),minimumFractionDigits:2,maximumFractionDigits:4,useGrouping:mode!=="de-plain"}).format(n);}catch(_e){return `${this._formatNumber(n,2,4)} ${this._escape(String(currency||"EUR"))}`;}}
+  _pct(v){return v==null?"–":`${this._formatNumber(Number(v)*100,1,1)} %`;}
+  _w(v){return v==null?"–":`${this._formatNumber(Number(v),1,1)} W`;}
+  _seconds(v){return v==null?"–":`${this._formatNumber(Number(v),Number(v)<10?2:1,Number(v)<10?2:1)} s`;}
+  _energy(kwh){kwh=Number(kwh||0);return kwh<1?`${this._formatNumber(kwh*1000,kwh<.1?1:0,kwh<.1?1:0)} Wh`:`${this._formatNumber(kwh,kwh<10?3:2,kwh<10?3:2)} kWh`;}
+  _energyShort(kwh){kwh=Number(kwh||0);return kwh<1?`${this._formatNumber(kwh*1000,0,0)}Wh`:`${this._formatNumber(kwh,1,1)}kWh`;}
+  _bytes(value){const n=Math.max(0,Number(value||0));if(n<1024)return `${this._formatNumber(n,0,0)} B`;if(n<1048576)return `${this._formatNumber(n/1024,n<10240?1:0,n<10240?1:0)} KB`;if(n<1073741824)return `${this._formatNumber(n/1048576,n<10485760?1:0,n<10485760?1:0)} MB`;return `${this._formatNumber(n/1073741824,2,2)} GB`;}
   _dateOnly(ms){return new Intl.DateTimeFormat(undefined,{dateStyle:"medium"}).format(new Date(Number(ms)));}
   _dateTime(ms){return new Intl.DateTimeFormat(undefined,{dateStyle:"short",timeStyle:"short"}).format(new Date(ms));}
   _axisLabel(ms,res){const d=new Date(ms);if(res==="15m"||res==="hour")return new Intl.DateTimeFormat(undefined,{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}).format(d);return new Intl.DateTimeFormat(undefined,{day:"2-digit",month:"2-digit",year:"2-digit"}).format(d);}

@@ -97,11 +97,22 @@ class LastQuarterEnergySensor(AllocationBaseSensor):
         if not record:
             return None
         start_ms = int(record["start"])
-        return {
+        attrs = {
             "fenster_start_ms": start_ms,
             "fenster_ende_ms": start_ms + int(record["duration"] * 1000),
             "datenabdeckung_prozent": round(float(record["coverage"]) * 100, 2),
         }
+        if self.source == "total":
+            meter = record.get("energy_meter", {}).get(self.consumer_id)
+            if isinstance(meter, dict):
+                attrs["energiemethode"] = meter.get("status")
+                attrs["energiezaehler_entity"] = meter.get("entity_id")
+                attrs["energiezaehler_delta_kwh"] = meter.get("meter_delta_kwh")
+                attrs["leistungsintegration_kwh"] = meter.get("power_integrated_kwh")
+                attrs["abweichung_prozent"] = meter.get("deviation_percent")
+                if meter.get("reason"):
+                    attrs["energiezaehler_fallback_grund"] = meter.get("reason")
+        return attrs
 
 
 class LastQuarterShareSensor(AllocationBaseSensor):
@@ -132,6 +143,62 @@ class LastQuarterShareSensor(AllocationBaseSensor):
         if total <= 0:
             return 0.0
         return max(0.0, min(100.0, float(values.get(self.source, 0.0)) / total * 100.0))
+
+
+
+
+class PVGeneratorLifetimeEnergySensor(AllocationBaseSensor):
+    """PV energy from one physical generator allocated to one consumer."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_suggested_display_precision = 3
+
+    def __init__(self, entry, controller, consumer_id, consumer_label, generator_id, generator_label):
+        super().__init__(entry, controller)
+        self.consumer_id = consumer_id
+        self.generator_id = generator_id
+        self._attr_name = f"{consumer_label} PV von {generator_label} Energie gesamt"
+        self._attr_unique_id = f"{entry.entry_id}_{consumer_id}_pv_generator_{generator_id}_energy_lifetime"
+
+    @property
+    def native_value(self) -> float:
+        return self.controller.pv_generator_lifetime[self.consumer_id][self.generator_id]
+
+
+class PVGeneratorLastQuarterEnergySensor(AllocationBaseSensor):
+    """Last completed quarter PV energy from one generator to one consumer."""
+
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_suggested_display_precision = 4
+
+    def __init__(self, entry, controller, consumer_id, consumer_label, generator_id, generator_label):
+        super().__init__(entry, controller)
+        self.consumer_id = consumer_id
+        self.generator_id = generator_id
+        self._attr_name = f"{consumer_label} PV von {generator_label} letzte 15 min"
+        self._attr_unique_id = f"{entry.entry_id}_{consumer_id}_pv_generator_{generator_id}_energy_last_15m"
+
+    @property
+    def native_value(self) -> float | None:
+        record = self.controller.last_15m
+        if not record:
+            return None
+        return float(record.get("pv_by_generator_kwh", {}).get(self.consumer_id, {}).get(self.generator_id, 0.0))
+
+    @property
+    def extra_state_attributes(self):
+        record = self.controller.last_15m
+        if not record:
+            return None
+        start_ms = int(record["start"])
+        return {
+            "fenster_start_ms": start_ms,
+            "fenster_ende_ms": start_ms + int(record["duration"] * 1000),
+            "datenabdeckung_prozent": round(float(record["coverage"]) * 100, 2),
+        }
 
 
 class CoverageLifetimeSensor(AllocationBaseSensor):
@@ -244,6 +311,14 @@ async def async_setup_entry(
             entities.append(
                 LastQuarterShareSensor(entry, controller, consumer_id, label, source)
             )
+        for generator_id, generator in controller.all_generators.items():
+            generator_label = str(generator.get("name") or generator_id)
+            entities.append(PVGeneratorLifetimeEnergySensor(
+                entry, controller, consumer_id, label, generator_id, generator_label
+            ))
+            entities.append(PVGeneratorLastQuarterEnergySensor(
+                entry, controller, consumer_id, label, generator_id, generator_label
+            ))
 
     entities.extend(
         [

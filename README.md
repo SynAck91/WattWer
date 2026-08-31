@@ -35,12 +35,19 @@ Wenn dir WattWer hilft und du die Weiterentwicklung unterstützen möchtest:
 - optionaler Nacht-Fallback auf 0 W
 - getrennte PV-/Netz-/Batterie-Energie
 - synchronisierte Live-Zuordnung asynchron meldender Sensoren über zeitgestempelten Messwertpuffer und Sample-and-Hold
-- Diagnose der aktuellen Messwertspreizung und des Sample-Alters
+- adaptive Frischebewertung pro Netz-, Verbraucher-, Batterie- und PV-Sensor anhand seines gelernten Meldeintervalls
+- Diagnose von typischem Meldeintervall, aktuellem Alter, Warnschwelle und hartem Timeout je Sensor
 - feste 15-Minuten-Auswertung
 - Home-Assistant Long-Term Statistics über kumulative Energie-Sensoren
 - historischer Backfill aus noch vorhandenen Recorder-Rohdaten
 - eigenes WattWer-Dashboard und eigenes Konfigurationspanel
 - vorbereitet für Batteriespeicher mit getrennten Lade-/Entlade-Leistungssensoren
+- optionaler Hardware-Energiezähler je Verbraucher zur Kalibrierung der integrierten Gesamt-kWh
+- Hybridmodus auch im historischen Backfill
+- optionale kumulative PV-Energiezähler je Erzeuger zur Kalibrierung/Prüfung der erzeugten kWh
+- exakte energiebasierte Kostenabrechnung mit historischen Netz-, PV- und optional Batterie-Tarifen
+- eigener Preisverlauf je PV-Erzeuger mit `Gültig ab`-Datum
+- einstellbares Zahlenformat; Standard Deutsch `1.000,00`
 
 ## Berechnungsprinzip
 
@@ -60,13 +67,78 @@ Mit Batterie:
 Gesamtenergie = PV-Energie + Netzenergie + Batterieenergie
 ```
 
+## Optionale Energiezähler / Hybridmessung
+
+Zusätzlich zum verpflichtenden Leistungssensor kann jedem Verbraucher optional ein **kumulativer Energiezähler** zugeordnet werden, z. B. ein Shelly-Sensor mit `device_class: energy` und `state_class: total_increasing`. WattWer ersetzt die Leistungsmessung dadurch **nicht**: Die Watt-Werte bleiben notwendig, um den zeitgleichen Quellenmix aus PV, Netz und Batterie zu bestimmen.
+
+Bei einem abgeschlossenen 15-Minuten-Fenster vergleicht WattWer die integrierte Leistung mit dem Delta des Hardware-Energiezählers. Ist der Zähler plausibel, gilt dessen Delta als Gesamtenergie des Verbrauchers. Die aus den Leistungssamples bestimmten Quellenanteile werden anschließend proportional auf diesen Gesamtwert normiert:
+
+```text
+Gesamt-kWh = Hardware-Zählerdelta
+PV-/Netz-/Batterie-Anteile = aus zeitgleichen Leistungssamples
+PV-kWh + Netz-kWh + Batterie-kWh = Gesamt-kWh
+```
+
+Im Verbraucher-Editor stehen drei Modi zur Verfügung:
+
+- **Automatisch (empfohlen):** WattWer verwendet einen als Energie-/Total-Zähler erkannten Sensor, sofern sein Delta plausibel ist.
+- **Energiezähler bevorzugen:** Der konfigurierte kumulative Zähler wird bevorzugt verwendet; Sicherheitsprüfungen gegen Rücksprünge und ausbleibenden Zählerfortschritt bleiben aktiv.
+- **Nur Leistungsintegration:** Verhalten wie vor 0.6.0; der optionale Energiezähler wird ignoriert.
+
+Bei `unknown`/`unavailable`, Zählerreset, Rücksprung oder einem Zähler, der trotz klar gemessener Last nicht fortschreitet, fällt WattWer für das betroffene Intervall automatisch auf die Leistungsintegration zurück. Unterstützte Energieeinheiten sind Wh, kWh, MWh, J, kJ und MJ.
+
+**Backfill:** Historische Energiezähler werden ebenfalls berücksichtigt. Wenn die kumulativen Zählerstände im Recorder für Start und Ende eines Viertelstundenfensters vorhanden sind, kalibriert WattWer den rückwirkenden Gesamtverbrauch mit dem historischen Zählerdelta und verwendet die historischen Leistungswerte weiterhin für PV-/Netz-/Batterieanteile. Fehlen die Zählerstände, bleibt dieses einzelne Intervall beim Power-Fallback.
+
+### PV-Energiezähler
+
+Auch jedem PV-Erzeuger kann optional ein kumulativer Energiezähler zugeordnet werden. WattWer vergleicht dessen Delta pro abgeschlossenem 15-Minuten-Fenster mit der aus der PV-Leistung integrierten Erzeugungsenergie. Bei plausiblen Daten wird das Hardware-Zählerdelta als kalibrierter Erzeugungswert des PV-Erzeugers geführt; bei fehlendem, zurückgesetztem oder unplausiblem Zähler bleibt die Leistungsintegration aktiv. Dieselbe Auswertung wird beim Backfill auf historische Zählerstände angewendet.
+
+Der PV-Energiezähler skaliert **nicht** pauschal die PV-kWh einzelner Verbraucher. Das wäre physikalisch falsch, weil erzeugte PV-Energie auch ins Netz eingespeist oder in eine Batterie geladen werden kann. Die Verbraucherzuordnung bleibt daher zeitgleich auf Leistungs-/Netzbilanz und elektrischer Topologie basiert; der PV-kWh-Zähler verbessert die Erzeugungsdiagnose und Plausibilisierung.
+
+## Kostenabrechnung und Tarifhistorie
+
+WattWer kann die Kosten **energiebasiert je Abrechnungsintervall** berechnen. Die Preise werden nicht als einzelner überschreibbarer Wert gespeichert, sondern als Tarifhistorie mit einem lokalen `Gültig ab`-Datum. Dadurch kann z. B. ein neuer Stromtarif ab `01.01.2027` ergänzt werden, ohne die Kosten aus 2026 zu verändern.
+
+Konfigurierbar sind:
+
+- zentraler Netzbezugspreis pro kWh mit beliebig vielen Preisperioden,
+- eigener PV-Kostenpreis pro kWh **für jeden PV-Erzeuger** mit eigener Historie,
+- optional ein Batterie-Kostenpreis pro kWh bei aktivierter Batterie,
+- Währung.
+
+Für Verbraucher `i` wird innerhalb eines Zeitfensters gerechnet:
+
+```text
+Kosten_i = Netz_kWh_i × Netzpreis
+         + Summe(PV_kWh_i,Erzeuger × PV-Preis_Erzeuger)
+         + Batterie_kWh_i × Batteriepreis
+```
+
+WattWer führt dafür die PV-Zuordnung zusätzlich je physischem Erzeuger. Die Kosten sind damit exakt **innerhalb der in WattWer definierten zeitgleichen Zuordnungsregel**. Ist die Herkunft eines PV-Anteils wegen fehlender Erzeugermessungen nicht eindeutig, wird dieser Anteil bewusst als **ungepreist** ausgewiesen und nicht mit einem geratenen Durchschnittspreis bewertet. Die Kostenabdeckung zeigt, welcher Anteil der verbrauchten Energie tatsächlich mit einem gültigen Tarif bepreist werden konnte.
+
+Beim Backfill wird ebenfalls der Tarif verwendet, der am historischen Zeitstempel gültig war. Eine spätere Tarifperiode verändert ältere Intervalle daher nicht. Wird ein bereits vorhandener alter Tarif bewusst bearbeitet, wird die historische Kostenberechnung entsprechend dieser korrigierten Tarifhistorie neu ausgewertet.
+
+Das Dashboard zeigt Kosten in den Verbraucher-/Gruppenkarten und im Diagramm-Tooltip. Der CSV-Export enthält Gesamt-, PV-, Netz- und Batteriekosten sowie Kostenabdeckung und Währung.
+
+Unter **Anzeige → Zahlenformat** kann die Darstellung browserlokal gewählt werden:
+
+- **Deutsch `1.000,00`** (Standard)
+- **Englisch `1,000.00`**
+- **ohne Tausendertrennzeichen `1000,00`**
+
+Intern rechnet WattWer weiterhin mit ungerundeten numerischen Werten; die Formatierung erfolgt nur bei der Anzeige.
+
 ## Messwert-Synchronisierung
 
 Netzzähler, Shellys und Wechselrichter melden ihre Werte in Home Assistant nicht zwingend im selben Moment. WattWer kann die Live-Messwerte deshalb zeitlich ausrichten. Jeder gemeldete Wert wird zusammen mit seinem Home-Assistant-Zeitstempel gepuffert; die Berechnung läuft standardmäßig **5 Sekunden hinter der Echtzeit** und verwendet für den gemeinsamen Zielzeitpunkt jeweils den letzten gemeldeten Wert **vor oder genau an diesem Zeitpunkt**.
 
-Diese Sample-and-Hold-Methode vermeidet insbesondere, dass ein neuer Netzleistungswert mit einem erst später eintreffenden Verbraucherwert vermischt oder ein zukünftiger Lastsprung rückwirkend vorgezogen wird. Standardwerte: 5 s Verzögerung, 30 s Puffer und 10 s maximales Sample-Alter für normale Quellen. Langsamere PV-Erzeuger können weiterhin ihr eigenes größeres Sensoralter besitzen. Die Synchronisierung und ihre Parameter lassen sich unter **WattWer → Allgemein → Messwert-Synchronisierung** ändern.
+Diese Sample-and-Hold-Methode vermeidet insbesondere, dass ein neuer Netzleistungswert mit einem erst später eintreffenden Verbraucherwert vermischt oder ein zukünftiger Lastsprung rückwirkend vorgezogen wird.
 
-Im Dashboard zeigt WattWer zusätzlich die aktuelle Synchronitätsqualität, Messwertspreizung und das Alter des ältesten verwendeten Samples. Eine echte Hardware-Zeitsynchronisation der Messgeräte kann WattWer damit nicht erzeugen; die zeitliche Zuordnung in Home Assistant wird jedoch konsistenter.
+Ab **0.5.6** bewertet WattWer die Frische nicht mehr mit einer einzigen starren Zeitgrenze. Für **jeden** Netz-, Verbraucher-, Batterie- und PV-Sensor werden die letzten Meldeintervalle beobachtet. Aus Median und robustem Jitter (MAD) lernt WattWer, wie schnell dieser Sensor normalerweise berichtet. Erst wenn das aktuelle Alter für genau diesen Sensor ungewöhnlich groß wird, erscheint der Status **verzögert**. Der zuletzt gültige Messwert wird dabei weiter per Sample-and-Hold verwendet. Ein separater harter Timeout verhindert, dass ein ausgefallener Sensor unbegrenzt fortgeschrieben wird: normale Sensoren standardmäßig nach **60 s**, PV-Erzeuger nach ihrem jeweils konfigurierten **maximalen Sensoralter**. Ein PV-Sensor, der typischerweise nur alle 60 s meldet, wird damit nicht mehr wie ein 5-s-Shelly behandelt.
+
+Nach mindestens sechs gelernten Intervallen wird die Warnschwelle adaptiv bestimmt. Während der Lernphase gilt der Sensor als **lernt**, ohne die Energieerfassung unnötig zu blockieren. Lange Offline-/Nachtpausen werden nicht als normales Meldeintervall angelernt. Bei PV-Erzeugern mit aktiviertem Nacht-Fallback bleibt die sichere Regel **nachts ohne Messung = 0 W** erhalten. Primär- und Fallback-Sensor eines PV-Erzeugers lernen ihre Meldeintervalle unabhängig voneinander.
+
+Im Dashboard zeigt der aufklappbare Bereich **Sensor-Timing** pro Entity das typische Meldeintervall, das aktuelle Sample-Alter, die adaptive Warnschwelle, den harten Timeout und den Lernstatus. Die absolute Messwertspreizung bleibt als Diagnose sichtbar, entscheidet aber nicht mehr allein darüber, ob ein Snapshot gültig ist. Eine echte Hardware-Zeitsynchronisation kann WattWer weiterhin nicht erzeugen; die zeitliche Zuordnung in Home Assistant wird jedoch deutlich robuster.
 
 Das Verlaufsdiagramm bietet außerdem ein interaktives Tooltip beim Überfahren eines Balkens mit Zeitfenster, Datenabdeckung, Gesamtenergie, PV-/Netz-/Batterieenergie und den jeweiligen Anteilen.
 
@@ -115,9 +187,13 @@ Jeder PV-Erzeuger besitzt eine stabile interne ID und kann unabhängig bearbeite
 
 Beim Wechsel eines Wechselrichters sollte der bestehende PV-Erzeuger bearbeitet und nur seine Entity geändert werden. Dadurch bleibt die Konfigurationshistorie konsistent.
 
+### Vorzeichen von PV-Messungen
+
+Nicht alle Messgeräte verwenden dieselbe Konvention. Ein Wechselrichter liefert Erzeugung häufig als **positiven** Wert, ein bidirektionaler Unterzähler kann Einspeisung dagegen als **negativen** Wert melden. WattWer 0.5.8 erlaubt deshalb pro PV-Erzeuger die Auswahl **+W = Erzeugung** oder **−W = Erzeugung**. Für den Fallback-Sensor kann unabhängig davon dieselbe oder eine abweichende Vorzeichenregel gewählt werden. Die Einstellung wird auch beim Backfill angewendet, sodass ein Zeitraum nach einer Korrektur der Vorzeichenkonfiguration erneut rekonstruiert werden kann. Ein neu ausgeführter Backfill ist dabei ausdrücklich ein **Korrektur-Backfill**: Bei gleicher oder besserer Datenabdeckung darf er einen alten Live-Datensatz für dasselbe Zeitfenster in der WattWer-Auswertung ersetzen. Die ursprüngliche Home-Assistant-Recorder-Historie wird dabei nicht gelöscht oder manipuliert.
+
 ## Update von WattWer 0.1–0.4
 
-WattWer 0.5.5 enthält weiterhin die automatische Migration aus älteren WattWer-Versionen.
+WattWer 0.5.8 enthält weiterhin die automatische Migration aus älteren WattWer-Versionen.
 
 **Wichtig: Die bestehende Integration vor dem Update nicht löschen.**
 
@@ -159,7 +235,7 @@ Der kleine interne Runtime-Zustand wird ab 0.5.4 nur noch:
 
 gespeichert. Dadurch sinkt die Schreiblast gegenüber älteren Versionen deutlich, ohne die 15-Minuten-Abrechnung zu gefährden.
 
-Im WattWer-Dashboard gibt es außerdem den Bereich **Speicher & Statistik**. Dort werden unter anderem angezeigt:
+Im WattWer-Dashboard gibt es außerdem den **einklappbaren** Bereich **Speicher & Statistik**. Sein offener/geschlossener Zustand bleibt bei Live-Refreshes und Seitenreloads browserlokal erhalten. Dort werden unter anderem angezeigt:
 
 - tatsächliche Größe der WattWer-Runtime- und Backfill-Dateien,
 - konservativ geschätztes logisches Runtime-Schreibvolumen pro Tag,
@@ -216,12 +292,19 @@ If WattWer is useful to you and you would like to support further development:
 - optional night fallback to 0 W
 - separate PV, grid, and battery energy
 - synchronized live allocation for asynchronously reporting sensors using a timestamped buffer and sample-and-hold
-- diagnostics for current measurement spread and sample age
+- adaptive freshness learning per grid, consumer, battery, and PV sensor based on its own reporting cadence
+- per-sensor diagnostics for typical reporting interval, current age, warning threshold, and hard timeout
 - fixed 15-minute evaluation windows
 - Home Assistant Long-Term Statistics through cumulative energy sensors
 - historical backfill from raw Recorder data that is still available
 - dedicated WattWer dashboard and configuration panel
 - prepared for battery storage using separate charge and discharge power sensors
+- optional cumulative hardware energy meter per consumer for total-kWh calibration
+- the same hybrid method is available during historical backfill
+- optional cumulative PV energy meter for each PV generator
+- exact energy-based cost accounting with historical grid, PV, and optional battery tariffs
+- an independent tariff history for every PV generator
+- configurable number format; German `1.000,00` is the default
 
 ## Allocation principle
 
@@ -241,13 +324,76 @@ With a battery:
 Total energy = PV energy + grid energy + battery energy
 ```
 
+## Optional energy meters / hybrid measurement
+
+Each consumer can optionally be assigned a **cumulative energy meter** in addition to its required power sensor, for example a Shelly entity with `device_class: energy` and `state_class: total_increasing`. The power sensor is **not replaced**: Watt values are still required to determine the time-correlated PV/grid/battery source mix.
+
+When a 15-minute interval closes, WattWer compares the power integration with the hardware energy-counter delta. If the counter is plausible, its delta becomes the consumer's total energy. The source shares derived from the synchronized power samples are then normalized to that total:
+
+```text
+Total kWh = hardware meter delta
+PV/grid/battery shares = derived from synchronized power samples
+PV kWh + grid kWh + battery kWh = total kWh
+```
+
+Three modes are available in the consumer editor:
+
+- **Automatic (recommended):** use a recognized energy/total counter when its delta is plausible.
+- **Prefer energy meter:** prefer the configured cumulative counter while retaining safety checks for resets/backward jumps and a counter that does not advance.
+- **Power integration only:** legacy behavior; ignore the optional energy counter.
+
+If the counter is unavailable, resets, moves backwards, or does not advance despite clearly measured consumption, WattWer automatically falls back to power integration for that interval. Supported units are Wh, kWh, MWh, J, kJ and MJ.
+
+**Backfill:** historical cumulative energy-counter states are used as well. When Recorder contains suitable counter values around a quarter-hour boundary, WattWer calibrates the reconstructed total energy from the historical counter delta while historical power samples continue to determine the PV/grid/battery shares. Missing or invalid counter history only affects that interval, which falls back to power integration.
+
+### PV energy meters
+
+Each PV generator may also have an optional cumulative energy counter. WattWer compares its interval delta with the PV power integration and uses it for generation diagnostics/calibration when plausible. This also works during backfill. A PV generation counter does **not** blindly scale consumer PV energy, because generation may also be exported to the grid or charge a battery.
+
+## Cost accounting and tariff history
+
+WattWer can calculate costs **from the allocated energy of each billing interval**. Prices are stored as dated tariff histories instead of one overwriteable value. Adding a new electricity price effective `2027-01-01`, for example, leaves all 2026 intervals on their historical tariff.
+
+Configurable tariff histories include:
+
+- grid import price per kWh,
+- an individual PV cost per kWh for **every PV generator**,
+- an optional battery discharge cost per kWh,
+- currency.
+
+For consumer `i` the accounting rule is:
+
+```text
+Cost_i = grid_kWh_i × grid_price
+       + sum(PV_kWh_i,generator × PV_price_generator)
+       + battery_kWh_i × battery_price
+```
+
+WattWer therefore retains PV allocation by physical generator in addition to aggregate PV energy. Costs are exact **within WattWer's configured simultaneous allocation rule**. If PV origin cannot be attributed to a known generator because source measurements are missing, WattWer leaves that energy **unpriced** instead of guessing an average PV price. Cost coverage indicates how much of the consumed energy had a valid tariff assignment.
+
+Backfill selects the tariff that was valid at the historical interval timestamp. Adding a later tariff does not modify older costs. Deliberately editing an old tariff will, as expected, recalculate history according to the corrected tariff schedule.
+
+Consumer/group cards and chart tooltips show costs, and CSV export includes total, PV, grid and battery cost, cost coverage and currency.
+
+The browser-local **Display → Number format** option supports:
+
+- **German `1.000,00`** (default)
+- **English `1,000.00`**
+- **no thousands separator `1000,00`**
+
+Internal calculations remain numeric and unrounded; formatting is applied only for display.
+
 ## Measurement synchronization
 
 Grid meters, Shelly devices, and inverters do not necessarily report to Home Assistant at exactly the same time. WattWer can therefore align live measurements on a common target timestamp. Each report is buffered together with its Home Assistant timestamp; by default the allocation runs **5 seconds behind wall-clock time** and uses the most recent reported sample **at or before the target timestamp** for every source.
 
-This sample-and-hold approach avoids mixing a fresh grid value with a consumer value that arrives a few seconds later, and it never moves a future load step backwards in time. Defaults are a 5 s delay, 30 s buffer, and 10 s maximum sample age for normal sources. Slower PV generators may still use their own larger freshness limit. Synchronization can be configured under **WattWer → General → Measurement synchronization**.
+This sample-and-hold approach avoids mixing a fresh grid value with a consumer value that arrives a few seconds later, and it never moves a future load step backwards in time.
 
-The dashboard also reports synchronization quality, current measurement spread, and the age of the oldest sample in use. WattWer cannot create true hardware-level clock synchronization between meters, but it can make the temporal allocation inside Home Assistant substantially more consistent.
+Starting with **0.5.6**, WattWer no longer judges every source against one fixed freshness limit. It learns the reporting cadence of **each** grid, consumer, battery, and PV sensor from recent report intervals. A robust median and MAD-based jitter estimate determine when that particular sensor should be considered **delayed**. Its most recent valid sample remains usable during that delay. A separate hard fail-safe prevents indefinite sample hold: normal sensors default to **60 seconds**, while PV generators use their individually configured **maximum sensor age**. A PV sensor that normally reports once per minute is therefore not judged by the same timing expectation as a 5-second Shelly.
+
+After at least six learned intervals, warning thresholds are adaptive. During warm-up the sensor is marked as **learning** instead of unnecessarily invalidating energy allocation. Long offline/night gaps are excluded from cadence learning. PV generators with night-zero enabled retain the safe **missing at night = 0 W** behavior, and primary/fallback PV sensors learn independently.
+
+The dashboard now provides an expandable **Sensor timing** section showing each entity's typical interval, current age, adaptive warning threshold, hard timeout, and learning status. Absolute measurement spread remains visible as a diagnostic but no longer determines validity by itself. WattWer still cannot create true hardware-level clock synchronization, but the temporal allocation inside Home Assistant becomes substantially more robust.
 
 The history chart also provides an interactive hover tooltip showing the time interval, data coverage, total energy, PV/grid/battery energy, and source percentages.
 
@@ -298,7 +444,7 @@ When replacing an inverter or meter, edit the existing PV generator and change o
 
 ## Updating from WattWer 0.1–0.4
 
-WattWer 0.5.5 continues to include automatic migration from older WattWer versions.
+WattWer 0.5.8 continues to include automatic migration from older WattWer versions.
 
 **Important: Do not delete the existing integration before updating.**
 
@@ -340,7 +486,7 @@ Starting with 0.5.4, the small internal runtime state is persisted only:
 
 This significantly reduces unnecessary storage writes while preserving the 15-minute accounting data.
 
-The WattWer dashboard also contains a **Storage & Statistics** section showing, among other things:
+The WattWer dashboard also contains a **collapsible Storage & Statistics** section. Its open/closed state is preserved locally across live refreshes and page reloads. It shows, among other things:
 
 - actual size of the WattWer runtime and backfill files,
 - a conservative estimate of logical runtime writes per day,
@@ -369,3 +515,12 @@ Bugs and feature requests: https://github.com/SynAck91/WattWer/issues
 ## License
 
 MIT
+
+
+### Dashboard-Liveaktualisierung
+
+Die Live-Aktualisierung kann unter **WattWer → Zahnrad → Anzeige** auf 5, 10, 30 oder 60 Sekunden gestellt werden. Der geöffnete Zustand von **Sensor-Timing** bleibt beim Live-Refresh erhalten und wird browserlokal gespeichert.
+
+### Dashboard live refresh
+
+The live refresh interval can be configured under **WattWer → Settings → Display** to 5, 10, 30 or 60 seconds. The expanded state of **Sensor Timing** is preserved during live refreshes and stored locally in the browser.

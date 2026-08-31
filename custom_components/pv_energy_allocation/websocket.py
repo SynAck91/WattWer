@@ -14,14 +14,21 @@ from homeassistant.core import HomeAssistant, callback
 
 from .backfill import BackfillArchive, async_run_backfill
 from .const import (
+    CONF_ADAPTIVE_FRESHNESS,
+    CONF_ADAPTIVE_HARD_TIMEOUT,
     CONF_BACKGROUND_LOADS,
     CONF_BATTERY_CHARGE,
     CONF_BATTERY_DISCHARGE,
     CONF_CONSUMERS,
+    ENERGY_MODES,
+    ENERGY_MODE_AUTO,
     CONF_DEADBAND,
     CONF_GENERATORS,
     CONF_GRID_EXPORT,
     CONF_GRID_IMPORT,
+    CONF_GRID_TARIFFS,
+    CONF_BATTERY_TARIFFS,
+    CONF_CURRENCY,
     CONF_GROUPS,
     CONF_HOUR_RETENTION_DAYS,
     CONF_HOUSE_NET,
@@ -33,6 +40,10 @@ from .const import (
     CONF_SYNC_BUFFER,
     CONF_SYNC_MAX_SAMPLE_AGE,
     DEFAULT_GENERATOR_MAX_AGE,
+    GENERATOR_FALLBACK_POLARITIES,
+    GENERATOR_FALLBACK_POLARITY_SAME,
+    GENERATOR_POLARITIES,
+    GENERATOR_POLARITY_POSITIVE,
     DEFAULTS,
     DOMAIN,
     GENERATOR_ROLE_DIRECT_CONSUMER,
@@ -42,6 +53,7 @@ from .const import (
     VERSION,
 )
 from .controller import PVAllocationController
+from .pricing import normalize_tariffs
 from .history import async_get_history
 from .model import (
     new_consumer_id,
@@ -123,6 +135,9 @@ def ws_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, m
                 key: deepcopy(controller.cfg.get(key, DEFAULTS.get(key)))
                 for key in (
                     CONF_GRID_IMPORT,
+    CONF_GRID_TARIFFS,
+    CONF_BATTERY_TARIFFS,
+    CONF_CURRENCY,
                     CONF_GRID_EXPORT,
                     CONF_HOUSE_NET,
                     CONF_BACKGROUND_LOADS,
@@ -137,6 +152,11 @@ def ws_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, m
                     CONF_SYNC_DELAY,
                     CONF_SYNC_BUFFER,
                     CONF_SYNC_MAX_SAMPLE_AGE,
+                    CONF_ADAPTIVE_FRESHNESS,
+                    CONF_ADAPTIVE_HARD_TIMEOUT,
+                    CONF_GRID_TARIFFS,
+                    CONF_BATTERY_TARIFFS,
+                    CONF_CURRENCY,
                 )
             },
             "version": VERSION,
@@ -165,6 +185,13 @@ def _normalize_consumers(raw_items: list[Any]) -> list[dict[str, Any]]:
                 "enabled": bool(raw.get("enabled", True)),
                 "icon": str(raw.get("icon") or "mdi:flash").strip() or "mdi:flash",
                 "description": str(raw.get("description") or "").strip(),
+                "energy_entity_id": str(raw.get("energy_entity_id") or "").strip() or None,
+                "energy_mode": (
+                    str(raw.get("energy_mode") or ENERGY_MODE_AUTO)
+                    if str(raw.get("energy_mode") or ENERGY_MODE_AUTO) in ENERGY_MODES
+                    else ENERGY_MODE_AUTO
+                ),
+                "tariffs": normalize_tariffs(raw.get("tariffs")),
             }
         )
     return result
@@ -209,11 +236,21 @@ def _normalize_generators(raw_items: list[Any]) -> list[dict[str, Any]]:
             max_age = max(5.0, min(3600.0, float(raw.get("max_age", DEFAULT_GENERATOR_MAX_AGE))))
         except (TypeError, ValueError):
             max_age = float(DEFAULT_GENERATOR_MAX_AGE)
+        polarity = str(raw.get("polarity") or GENERATOR_POLARITY_POSITIVE)
+        if polarity not in GENERATOR_POLARITIES:
+            polarity = GENERATOR_POLARITY_POSITIVE
+        fallback_polarity = str(
+            raw.get("fallback_polarity") or GENERATOR_FALLBACK_POLARITY_SAME
+        )
+        if fallback_polarity not in GENERATOR_FALLBACK_POLARITIES:
+            fallback_polarity = GENERATOR_FALLBACK_POLARITY_SAME
         result.append(
             {
                 "id": gid,
                 "entity_id": entity_id,
                 "fallback_entity_id": str(raw.get("fallback_entity_id") or "").strip() or None,
+                "polarity": polarity,
+                "fallback_polarity": fallback_polarity,
                 "name": str(raw.get("name") or "").strip(),
                 "role": role,
                 "consumer_id": (
@@ -226,6 +263,13 @@ def _normalize_generators(raw_items: list[Any]) -> list[dict[str, Any]]:
                 "max_age": max_age,
                 "icon": str(raw.get("icon") or "mdi:solar-power").strip() or "mdi:solar-power",
                 "description": str(raw.get("description") or "").strip(),
+                "energy_entity_id": str(raw.get("energy_entity_id") or "").strip() or None,
+                "energy_mode": (
+                    str(raw.get("energy_mode") or ENERGY_MODE_AUTO)
+                    if str(raw.get("energy_mode") or ENERGY_MODE_AUTO) in ENERGY_MODES
+                    else ENERGY_MODE_AUTO
+                ),
+                "tariffs": normalize_tariffs(raw.get("tariffs")),
             }
         )
     return result
@@ -263,6 +307,17 @@ async def ws_update_config(hass: HomeAssistant, connection: websocket_api.Active
 
     backgrounds = set(str(x) for x in (controller.cfg.get(CONF_BACKGROUND_LOADS) or []))
     active_consumer_entities = {x["entity_id"] for x in consumers if x.get("enabled", True)}
+    energy_entities = [
+        str(x.get("energy_entity_id") or "")
+        for x in consumers
+        if x.get("enabled", True) and x.get("energy_entity_id")
+    ]
+    if len(energy_entities) != len(set(energy_entities)):
+        connection.send_error(msg["id"], "consumer_energy_duplicate", "Energy counter assigned to multiple consumers")
+        return
+    if overlap := set(energy_entities) & active_consumer_entities:
+        connection.send_error(msg["id"], "consumer_energy_power_duplicate", ", ".join(sorted(overlap)))
+        return
     if overlap := backgrounds & active_consumer_entities:
         connection.send_error(msg["id"], "consumer_background_duplicate", ", ".join(sorted(overlap)))
         return
@@ -273,11 +328,37 @@ async def ws_update_config(hass: HomeAssistant, connection: websocket_api.Active
         for eid in (item.get("entity_id"), item.get("fallback_entity_id"))
         if eid
     }
+    generator_energy_entities = [
+        str(item.get("energy_entity_id") or "")
+        for item in generators
+        if item.get("enabled", True) and item.get("energy_entity_id")
+    ]
+    if len(generator_energy_entities) != len(set(generator_energy_entities)):
+        connection.send_error(msg["id"], "generator_energy_duplicate", "PV energy counter assigned to multiple generators")
+        return
     if overlap := generator_entities & active_consumer_entities:
         connection.send_error(msg["id"], "generator_consumer_duplicate", ", ".join(sorted(overlap)))
         return
     if overlap := generator_entities & backgrounds:
         connection.send_error(msg["id"], "generator_background_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(energy_entities) & generator_entities:
+        connection.send_error(msg["id"], "consumer_energy_generator_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(generator_energy_entities) & generator_entities:
+        connection.send_error(msg["id"], "generator_energy_power_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(generator_energy_entities) & active_consumer_entities:
+        connection.send_error(msg["id"], "generator_energy_consumer_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(generator_energy_entities) & set(energy_entities):
+        connection.send_error(msg["id"], "generator_consumer_energy_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(energy_entities) & backgrounds:
+        connection.send_error(msg["id"], "consumer_energy_background_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(generator_energy_entities) & backgrounds:
+        connection.send_error(msg["id"], "generator_energy_background_duplicate", ", ".join(sorted(overlap)))
         return
     grid_entities = {
         str(controller.cfg.get(CONF_GRID_IMPORT) or ""),
@@ -289,6 +370,12 @@ async def ws_update_config(hass: HomeAssistant, connection: websocket_api.Active
         return
     if overlap := active_consumer_entities & grid_entities:
         connection.send_error(msg["id"], "consumer_grid_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(energy_entities) & grid_entities:
+        connection.send_error(msg["id"], "consumer_energy_grid_duplicate", ", ".join(sorted(overlap)))
+        return
+    if overlap := set(generator_energy_entities) & grid_entities:
+        connection.send_error(msg["id"], "generator_energy_grid_duplicate", ", ".join(sorted(overlap)))
         return
 
     new_options = {
@@ -448,6 +535,11 @@ def _normalize_settings(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str
     settings[CONF_BACKGROUND_LOADS] = list(
         dict.fromkeys(str(x).strip() for x in (raw.get(CONF_BACKGROUND_LOADS) or []) if str(x).strip())
     )
+    settings[CONF_GRID_TARIFFS] = normalize_tariffs(raw.get(CONF_GRID_TARIFFS))
+    settings[CONF_BATTERY_TARIFFS] = normalize_tariffs(raw.get(CONF_BATTERY_TARIFFS))
+    settings[CONF_CURRENCY] = str(raw.get(CONF_CURRENCY) or DEFAULTS[CONF_CURRENCY]).strip().upper() or "EUR"
+    if len(settings[CONF_CURRENCY]) > 8:
+        return None, "invalid_currency"
     try:
         settings[CONF_SAMPLE_INTERVAL] = int(raw.get(CONF_SAMPLE_INTERVAL, DEFAULTS[CONF_SAMPLE_INTERVAL]))
         settings[CONF_MAX_AGE] = float(raw.get(CONF_MAX_AGE, DEFAULTS[CONF_MAX_AGE]))
@@ -458,6 +550,8 @@ def _normalize_settings(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str
         settings[CONF_SYNC_DELAY] = float(raw.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY]))
         settings[CONF_SYNC_BUFFER] = float(raw.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER]))
         settings[CONF_SYNC_MAX_SAMPLE_AGE] = float(raw.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE]))
+        settings[CONF_ADAPTIVE_FRESHNESS] = bool(raw.get(CONF_ADAPTIVE_FRESHNESS, DEFAULTS[CONF_ADAPTIVE_FRESHNESS]))
+        settings[CONF_ADAPTIVE_HARD_TIMEOUT] = float(raw.get(CONF_ADAPTIVE_HARD_TIMEOUT, DEFAULTS[CONF_ADAPTIVE_HARD_TIMEOUT]))
     except (TypeError, ValueError):
         return None, "invalid_numeric_setting"
     if not 2 <= settings[CONF_SAMPLE_INTERVAL] <= 30:
@@ -476,7 +570,13 @@ def _normalize_settings(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str
         return None, "invalid_sync_buffer"
     if not 2 <= settings[CONF_SYNC_MAX_SAMPLE_AGE] <= 120:
         return None, "invalid_sync_max_sample_age"
-    if settings[CONF_SYNC_ENABLED] and settings[CONF_SYNC_BUFFER] < settings[CONF_SYNC_DELAY] + settings[CONF_SYNC_MAX_SAMPLE_AGE]:
+    if not 15 <= settings[CONF_ADAPTIVE_HARD_TIMEOUT] <= 600:
+        return None, "invalid_adaptive_hard_timeout"
+    if (
+        settings[CONF_SYNC_ENABLED]
+        and not settings[CONF_ADAPTIVE_FRESHNESS]
+        and settings[CONF_SYNC_BUFFER] < settings[CONF_SYNC_DELAY] + settings[CONF_SYNC_MAX_SAMPLE_AGE]
+    ):
         return None, "sync_buffer_too_small"
     if bool(settings[CONF_BATTERY_CHARGE]) != bool(settings[CONF_BATTERY_DISCHARGE]):
         return None, "battery_pair_required"

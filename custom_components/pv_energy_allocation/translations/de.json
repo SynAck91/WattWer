@@ -22,7 +22,9 @@
           "sync_enabled": "Asynchrone Messwerte synchronisieren",
           "sync_delay": "Synchronisierungsverzögerung (s)",
           "sync_buffer": "Messwertpuffer (s)",
-          "sync_max_sample_age": "Maximales synchronisiertes Sample-Alter (s)"
+          "sync_max_sample_age": "Maximales synchronisiertes Sample-Alter (s)",
+          "adaptive_freshness": "Adaptive Sensor-Frische lernen",
+          "adaptive_hard_timeout": "Harter Timeout für normale Sensoren (s)"
         }
       }
     },

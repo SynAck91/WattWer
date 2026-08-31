@@ -6,11 +6,19 @@ import re
 import uuid
 from typing import Any
 
+from .pricing import normalize_tariffs
+
 from .const import (
     CONF_CONSUMERS,
     CONF_GENERATORS,
     CONF_GROUPS,
+    ENERGY_MODES,
+    ENERGY_MODE_AUTO,
     DEFAULT_GENERATOR_MAX_AGE,
+    GENERATOR_FALLBACK_POLARITIES,
+    GENERATOR_FALLBACK_POLARITY_SAME,
+    GENERATOR_POLARITIES,
+    GENERATOR_POLARITY_POSITIVE,
     GENERATOR_ROLE_DIRECT_CONSUMER,
     GENERATOR_ROLE_MAIN_BUS,
     GENERATOR_ROLES,
@@ -75,6 +83,12 @@ def normalize_consumers(cfg: dict[str, Any]) -> list[dict[str, Any]]:
                     "enabled": bool(item.get("enabled", True)),
                     "icon": str(item.get("icon") or "mdi:flash").strip() or "mdi:flash",
                     "description": str(item.get("description") or "").strip(),
+                    "energy_entity_id": str(item.get("energy_entity_id") or "").strip() or None,
+                    "energy_mode": (
+                        str(item.get("energy_mode") or ENERGY_MODE_AUTO)
+                        if str(item.get("energy_mode") or ENERGY_MODE_AUTO) in ENERGY_MODES
+                        else ENERGY_MODE_AUTO
+                    ),
                 }
             )
             seen_ids.add(cid)
@@ -100,6 +114,8 @@ def normalize_consumers(cfg: dict[str, Any]) -> list[dict[str, Any]]:
                 "enabled": True,
                 "icon": "mdi:flash",
                 "description": "",
+                "energy_entity_id": None,
+                "energy_mode": ENERGY_MODE_AUTO,
             }
         )
         seen_entities.add(entity_id)
@@ -117,6 +133,8 @@ def normalize_consumers(cfg: dict[str, Any]) -> list[dict[str, Any]]:
                 "enabled": True,
                 "icon": "mdi:flash",
                 "description": "",
+                "energy_entity_id": None,
+                "energy_mode": ENERGY_MODE_AUTO,
             }
         )
         seen_entities.add(entity_id)
@@ -151,11 +169,21 @@ def normalize_generators(
                 max_age = max(5.0, min(3600.0, float(item.get("max_age", DEFAULT_GENERATOR_MAX_AGE))))
             except (TypeError, ValueError):
                 max_age = float(DEFAULT_GENERATOR_MAX_AGE)
+            polarity = str(item.get("polarity") or GENERATOR_POLARITY_POSITIVE)
+            if polarity not in GENERATOR_POLARITIES:
+                polarity = GENERATOR_POLARITY_POSITIVE
+            fallback_polarity = str(
+                item.get("fallback_polarity") or GENERATOR_FALLBACK_POLARITY_SAME
+            )
+            if fallback_polarity not in GENERATOR_FALLBACK_POLARITIES:
+                fallback_polarity = GENERATOR_FALLBACK_POLARITY_SAME
             result.append(
                 {
                     "id": gid,
                     "entity_id": entity_id,
                     "fallback_entity_id": fallback,
+                    "polarity": polarity,
+                    "fallback_polarity": fallback_polarity,
                     "name": str(item.get("name") or entity_id).strip() or entity_id,
                     "role": role,
                     "consumer_id": consumer_id,
@@ -164,6 +192,13 @@ def normalize_generators(
                     "max_age": max_age,
                     "icon": str(item.get("icon") or "mdi:solar-power").strip() or "mdi:solar-power",
                     "description": str(item.get("description") or "").strip(),
+                    "energy_entity_id": str(item.get("energy_entity_id") or "").strip() or None,
+                    "energy_mode": (
+                        str(item.get("energy_mode") or ENERGY_MODE_AUTO)
+                        if str(item.get("energy_mode") or ENERGY_MODE_AUTO) in ENERGY_MODES
+                        else ENERGY_MODE_AUTO
+                    ),
+                    "tariffs": normalize_tariffs(item.get("tariffs")),
                 }
             )
             seen_ids.add(gid)
@@ -180,6 +215,8 @@ def normalize_generators(
                 "id": "legacy_main_pv",
                 "entity_id": main_pv,
                 "fallback_entity_id": None,
+                "polarity": GENERATOR_POLARITY_POSITIVE,
+                "fallback_polarity": GENERATOR_FALLBACK_POLARITY_SAME,
                 "name": "PV-Erzeuger",
                 "role": GENERATOR_ROLE_MAIN_BUS,
                 "consumer_id": None,
@@ -188,6 +225,9 @@ def normalize_generators(
                 "max_age": float(DEFAULT_GENERATOR_MAX_AGE),
                 "icon": "mdi:solar-power",
                 "description": "Aus älterer WattWer-Konfiguration übernommen",
+                "energy_entity_id": None,
+                "energy_mode": ENERGY_MODE_AUTO,
+                "tariffs": [],
             }
         )
 
@@ -200,6 +240,8 @@ def normalize_generators(
                 "id": "legacy_local_pv",
                 "entity_id": local_pv,
                 "fallback_entity_id": fallback,
+                "polarity": GENERATOR_POLARITY_POSITIVE,
+                "fallback_polarity": GENERATOR_FALLBACK_POLARITY_SAME,
                 "name": "Lokaler PV-Erzeuger",
                 "role": GENERATOR_ROLE_DIRECT_CONSUMER if target else GENERATOR_ROLE_MAIN_BUS,
                 "consumer_id": target,
@@ -208,6 +250,9 @@ def normalize_generators(
                 "max_age": float(DEFAULT_GENERATOR_MAX_AGE),
                 "icon": "mdi:solar-panel",
                 "description": "Aus älterer WattWer-Konfiguration übernommen",
+                "energy_entity_id": None,
+                "energy_mode": ENERGY_MODE_AUTO,
+                "tariffs": [],
             }
         )
     return result
@@ -242,6 +287,7 @@ def validate_consumer_config(consumers: list[dict[str, Any]], groups: list[dict[
         return "at_least_one_consumer"
     ids: set[str] = set()
     entities: set[str] = set()
+    energy_entities: set[str] = set()
     for item in consumers:
         cid = str(item.get("id") or "").strip()
         entity_id = str(item.get("entity_id") or "").strip()
@@ -250,6 +296,14 @@ def validate_consumer_config(consumers: list[dict[str, Any]], groups: list[dict[
             return "consumer_fields_required"
         if cid in ids or entity_id in entities:
             return "consumer_duplicate"
+        energy_entity = str(item.get("energy_entity_id") or "").strip()
+        energy_mode = str(item.get("energy_mode") or ENERGY_MODE_AUTO)
+        if energy_mode not in ENERGY_MODES:
+            return "consumer_invalid_energy_mode"
+        if energy_entity:
+            if energy_entity == entity_id or energy_entity in energy_entities:
+                return "consumer_energy_duplicate"
+            energy_entities.add(energy_entity)
         ids.add(cid)
         entities.add(entity_id)
 
@@ -286,6 +340,11 @@ def validate_generator_config(
         name = str(item.get("name") or "").strip()
         role = str(item.get("role") or GENERATOR_ROLE_MAIN_BUS)
         fallback = str(item.get("fallback_entity_id") or "").strip()
+        polarity = str(item.get("polarity") or GENERATOR_POLARITY_POSITIVE)
+        fallback_polarity = str(
+            item.get("fallback_polarity") or GENERATOR_FALLBACK_POLARITY_SAME
+        )
+        energy_mode = str(item.get("energy_mode") or ENERGY_MODE_AUTO)
         if not gid or not entity_id or not name:
             return "generator_fields_required"
         if gid in ids or entity_id in entities:
@@ -294,6 +353,12 @@ def validate_generator_config(
             return "generator_fallback_same"
         if role not in GENERATOR_ROLES:
             return "generator_invalid_role"
+        if polarity not in GENERATOR_POLARITIES:
+            return "generator_invalid_polarity"
+        if fallback_polarity not in GENERATOR_FALLBACK_POLARITIES:
+            return "generator_invalid_fallback_polarity"
+        if energy_mode not in ENERGY_MODES:
+            return "generator_invalid_energy_mode"
         if role == GENERATOR_ROLE_DIRECT_CONSUMER:
             if str(item.get("consumer_id") or "") not in valid_consumers:
                 return "generator_consumer_required"
