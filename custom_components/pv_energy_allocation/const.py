@@ -5,7 +5,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "pv_energy_allocation"  # Never change: keeps existing Config Entries/entities.
 NAME = "WattWer"
-VERSION = "0.5.4"
+VERSION = "0.5.5"
 PLATFORMS = [Platform.SENSOR]
 
 # Core metering configuration.
@@ -27,6 +27,10 @@ CONF_MAX_AGE = "max_age"
 CONF_DEADBAND = "deadband"
 CONF_QUARTER_RETENTION_DAYS = "quarter_retention_days"
 CONF_HOUR_RETENTION_DAYS = "hour_retention_days"
+CONF_SYNC_ENABLED = "sync_enabled"
+CONF_SYNC_DELAY = "sync_delay"
+CONF_SYNC_BUFFER = "sync_buffer"
+CONF_SYNC_MAX_SAMPLE_AGE = "sync_max_sample_age"
 
 # Legacy keys from WattWer <= 0.4.x. They intentionally remain supported for
 # migration only. No installation-specific entity IDs are shipped as defaults.
@@ -57,6 +61,10 @@ DEFAULTS = {
     CONF_DEADBAND: 0.0,
     CONF_QUARTER_RETENTION_DAYS: 10,
     CONF_HOUR_RETENTION_DAYS: 730,
+    CONF_SYNC_ENABLED: True,
+    CONF_SYNC_DELAY: 5.0,
+    CONF_SYNC_BUFFER: 30.0,
+    CONF_SYNC_MAX_SAMPLE_AGE: 10.0,
 }
 
 # Generator roles.

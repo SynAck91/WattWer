@@ -30,6 +30,10 @@ from .const import (
     CONF_MAX_AGE,
     CONF_QUARTER_RETENTION_DAYS,
     CONF_SAMPLE_INTERVAL,
+    CONF_SYNC_ENABLED,
+    CONF_SYNC_DELAY,
+    CONF_SYNC_BUFFER,
+    CONF_SYNC_MAX_SAMPLE_AGE,
     DEFAULT_GENERATOR_MAX_AGE,
     DEFAULTS,
     DOMAIN,
@@ -74,6 +78,11 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "battery_pair_required"
             elif user_input.get(CONF_BATTERY_CHARGE) and not (user_input.get(FIELD_INITIAL_PV) or []):
                 errors["base"] = "battery_requires_generator"
+            elif bool(user_input.get(CONF_SYNC_ENABLED, DEFAULTS[CONF_SYNC_ENABLED])) and float(user_input.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER])) < (
+                float(user_input.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY]))
+                + float(user_input.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE]))
+            ):
+                errors["base"] = "sync_buffer_too_small"
             else:
                 first_entity = str(user_input[FIELD_FIRST_CONSUMER])
                 grid_entities = {str(user_input[CONF_GRID_IMPORT]), str(user_input[CONF_GRID_EXPORT])}
@@ -137,6 +146,10 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_DEADBAND: float(user_input[CONF_DEADBAND]),
                     CONF_QUARTER_RETENTION_DAYS: int(user_input[CONF_QUARTER_RETENTION_DAYS]),
                     CONF_HOUR_RETENTION_DAYS: int(user_input[CONF_HOUR_RETENTION_DAYS]),
+                    CONF_SYNC_ENABLED: bool(user_input.get(CONF_SYNC_ENABLED, DEFAULTS[CONF_SYNC_ENABLED])),
+                    CONF_SYNC_DELAY: float(user_input.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY])),
+                    CONF_SYNC_BUFFER: float(user_input.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER])),
+                    CONF_SYNC_MAX_SAMPLE_AGE: float(user_input.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE])),
                     CONF_CONSUMERS: consumers,
                     CONF_GROUPS: [],
                     CONF_GENERATORS: generators,
@@ -161,6 +174,10 @@ class WattWerConfigFlow(ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_DEADBAND, default=DEFAULTS[CONF_DEADBAND]): _number(0, 100, 0.5),
                 vol.Required(CONF_QUARTER_RETENTION_DAYS, default=DEFAULTS[CONF_QUARTER_RETENTION_DAYS]): _number(1, 366, 1),
                 vol.Required(CONF_HOUR_RETENTION_DAYS, default=DEFAULTS[CONF_HOUR_RETENTION_DAYS]): _number(31, 3650, 1),
+                vol.Required(CONF_SYNC_ENABLED, default=DEFAULTS[CONF_SYNC_ENABLED]): bool,
+                vol.Required(CONF_SYNC_DELAY, default=DEFAULTS[CONF_SYNC_DELAY]): _number(0, 30, 0.5),
+                vol.Required(CONF_SYNC_BUFFER, default=DEFAULTS[CONF_SYNC_BUFFER]): _number(10, 300, 1),
+                vol.Required(CONF_SYNC_MAX_SAMPLE_AGE, default=DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE]): _number(2, 120, 1),
             }
         )
 

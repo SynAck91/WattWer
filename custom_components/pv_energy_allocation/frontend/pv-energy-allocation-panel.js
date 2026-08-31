@@ -76,8 +76,17 @@ class PVEnergyAllocationPanel extends HTMLElement {
         .main { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:16px; }
         .chartcard { padding:16px; min-width:0; }
         .charthead { display:flex; flex-wrap:wrap; gap:10px; justify-content:space-between; align-items:center; margin-bottom:12px; }
-        .chartwrap { overflow-x:auto; min-height:330px; }
+        .chartwrap { overflow-x:auto; min-height:330px; position:relative; }
         svg { width:100%; min-width:760px; height:330px; display:block; }
+        .barhit { fill:transparent; cursor:crosshair; }
+        .barhit:hover { fill:color-mix(in srgb, var(--primary-color) 10%, transparent); }
+        .charttooltip { position:fixed; z-index:1200; pointer-events:none; min-width:230px; max-width:310px; padding:11px 12px; border-radius:12px; background:var(--card-background-color); color:var(--primary-text-color); border:1px solid var(--divider-color); box-shadow:0 8px 28px rgba(0,0,0,.32); font-size:12px; line-height:1.35; opacity:0; transform:translateY(3px); transition:opacity .08s ease,transform .08s ease; }
+        .charttooltip.show { opacity:1; transform:translateY(0); }
+        .tttitle { font-weight:700; font-size:13px; margin-bottom:3px; }
+        .ttsub { color:var(--secondary-text-color); margin-bottom:8px; }
+        .ttrow { display:grid; grid-template-columns:12px 1fr auto auto; gap:7px; align-items:center; padding:3px 0; }
+        .ttswatch { width:9px; height:9px; border-radius:50%; }
+        .tttotal { margin-top:7px; padding-top:7px; border-top:1px solid var(--divider-color); display:flex; justify-content:space-between; gap:12px; font-weight:650; }
         .side { padding:16px; }
         .side h3, .chartcard h3 { margin:0; font-size:16px; }
         .diag { margin-top:14px; display:grid; gap:9px; }
@@ -348,6 +357,9 @@ class PVEnergyAllocationPanel extends HTMLElement {
       invalid: "ungültig",
     };
     const liveQuality = live.valid ? (qualityLabels[live.quality] || "gültig") : "ungültig";
+    const syncLabels={excellent:"sehr gut",good:"gut",fair:"mäßig",poor:"schlecht",warming_up:"läuft an",disabled:"aus"};
+    const syncQuality=syncLabels[live.sync_quality]||String(live.sync_quality||"–");
+    const last15=summary.last_15m||{};
 
     this.shadowRoot.getElementById("content").innerHTML = `
       <div class="grid">${cards || '<div class="loading">Keine Verbraucher konfiguriert.</div>'}</div>
@@ -372,6 +384,12 @@ class PVEnergyAllocationPanel extends HTMLElement {
             ${this._diagRow("PV-Erzeugung gemessen", this._w(live.generation_total_w))}
             ${this._diagRow("Bilanzfehler live", this._w(live.balance_error_w))}
             ${this._diagRow("Diagnose-Summensensor Δ", this._w(live.house_net_error_w))}
+            ${this._diagRow("Messwert-Synchronisierung", live.sync_enabled?`aktiv · ${syncQuality}`:"aus")}
+            ${live.sync_enabled?this._diagRow("Zielverzögerung", this._seconds(live.sync_delay_s)):""}
+            ${live.sync_enabled?this._diagRow("Messwertspreizung live", this._seconds(live.sync_spread_s)):""}
+            ${live.sync_enabled?this._diagRow("Ältestes Sample live", this._seconds(live.sync_max_sample_age_s)):""}
+            ${live.sync_enabled&&last15.sync_spread_avg_s!=null?this._diagRow("Spreizung Ø letzte 15 min", this._seconds(last15.sync_spread_avg_s)):""}
+            ${live.sync_enabled&&last15.sync_spread_max_s!=null?this._diagRow("Spreizung max. letzte 15 min", this._seconds(last15.sync_spread_max_s)):""}
           </div>
           ${live.quality_notes?.length ? `<p class="muted">${live.quality_notes.map(x=>this._escape(x)).join(" · ")}</p>`:""}
           ${!live.valid && live.stale_entities?.length ? `<p class="muted">Ungültig/veraltet: ${live.stale_entities.map(x=>this._escape(x)).join(", ")}</p>`:""}
@@ -381,6 +399,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
 
     const selector = this.shadowRoot.getElementById("consumerSelect");
     if (selector) selector.addEventListener("change", e => { this._selectedDisplay=e.target.value; this._renderCurrent(); });
+    this._wireChartTooltip();
   }
 
   _storagePanel(stats) {
@@ -439,7 +458,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
       const group = Math.ceil(points.length/maxBars); const sampled=[];
       for (let i=0;i<points.length;i+=group) {
         const slice=points.slice(i,i+group); const v={total:0,pv:0,grid:0,battery:0}; let dur=0,cov=0;
-        slice.forEach(r=>{["total","pv","grid","battery"].forEach(s=>v[s]+=Number(r.display[s]||0));dur+=r.duration;cov+=r.coverage*r.duration;});
+        slice.forEach(r=>{["total","pv","grid","battery"].forEach(src=>v[src]+=Number(r.display[src]||0));dur+=r.duration;cov+=r.coverage*r.duration;});
         sampled.push({start:slice[0].start,duration:dur,coverage:dur?cov/dur:0,display:v,sampled:true});
       }
       points=sampled;
@@ -454,15 +473,51 @@ class PVEnergyAllocationPanel extends HTMLElement {
       [[pv,"#f4b400","PV"],[grid,"#4285f4","Netz"],[bat,"#8e5bd9","Batterie"]].forEach(([val,color,name])=>{
         if (!batteryEnabled && name==="Batterie") return;
         const h=Number(val)/maxTotal*innerH; y-=h;
-        if (h>0) seg.push(`<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" fill="${color}" rx="1"><title>${name}: ${this._energy(Number(val))}</title></rect>`);
+        if (h>0) seg.push(`<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${barW.toFixed(2)}" height="${h.toFixed(2)}" fill="${color}" rx="1"></rect>`);
       });
-      return `<g><title>${this._dateTime(r.start)} · Gesamt ${this._energy(total)} · Abdeckung ${(r.coverage*100).toFixed(0)}%</title>${seg.join("")}</g>`;
+      const hitX=padL+i*step+step*.03, hitW=Math.max(1,step*.94);
+      const attrs=`data-chart-bar data-start="${Number(r.start)}" data-duration="${Number(r.duration||0)}" data-coverage="${Number(r.coverage||0)}" data-total="${total}" data-pv="${pv}" data-grid="${grid}" data-battery="${bat}" data-sampled="${r.sampled?1:0}"`;
+      return `<g>${seg.join("")}<rect class="barhit" x="${hitX.toFixed(2)}" y="${padT}" width="${hitW.toFixed(2)}" height="${innerH}" ${attrs}></rect></g>`;
     }).join("");
     let yLines=""; const ticks=5;
     for(let i=0;i<=ticks;i++){const y=padT+innerH-innerH*i/ticks;const val=maxTotal*i/ticks;yLines+=`<line x1="${padL}" x2="${width-padR}" y1="${y}" y2="${y}" stroke="var(--divider-color)" stroke-width="1"/><text x="${padL-8}" y="${y+4}" text-anchor="end" fill="var(--secondary-text-color)" font-size="11">${this._energyShort(val)}</text>`;}
     let xLabels=""; const labelCount=Math.min(8,points.length);
     for(let j=0;j<labelCount;j++){const idx=Math.min(points.length-1,Math.round(j*(points.length-1)/Math.max(1,labelCount-1)));const x=padL+(idx+.5)*step;xLabels+=`<text x="${x}" y="${height-12}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="11">${this._axisLabel(points[idx].start,resolution)}</text>`;}
-    return `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${yLines}${rects}${xLabels}</svg>`;
+    return `<svg class="energychart" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">${yLines}${rects}${xLabels}</svg><div class="charttooltip" id="chartTooltip"></div>`;
+  }
+
+  _wireChartTooltip() {
+    const wrap=this.shadowRoot.querySelector(".chartwrap"), tip=this.shadowRoot.getElementById("chartTooltip");
+    if(!wrap||!tip)return;
+    const hide=()=>tip.classList.remove("show");
+    wrap.addEventListener("pointerleave",hide);
+    wrap.addEventListener("pointermove",e=>{
+      const bar=e.composedPath().find(x=>x?.dataset?.chartBar!==undefined);
+      if(!bar){hide();return;}
+      const d=bar.dataset,start=Number(d.start||0),duration=Number(d.duration||0),coverage=Math.max(0,Math.min(1,Number(d.coverage||0)));
+      const total=Number(d.total||0),pv=Number(d.pv||0),grid=Number(d.grid||0),battery=Number(d.battery||0);
+      const pct=v=>total>0?`${(v/total*100).toFixed(1)} %`:"0,0 %";
+      const end=start+duration*1000;
+      const timeLabel=this._intervalLabel(start,end);
+      tip.innerHTML=`<div class="tttitle">${this._escape(timeLabel)}</div><div class="ttsub">Datenabdeckung ${(coverage*100).toFixed(1)} %${d.sampled==="1"?" · zusammengefasste Balken":""}</div>
+        <div class="ttrow"><span class="ttswatch pv"></span><span>PV</span><strong>${this._energy(pv)}</strong><span>${pct(pv)}</span></div>
+        <div class="ttrow"><span class="ttswatch gridc"></span><span>Netz</span><strong>${this._energy(grid)}</strong><span>${pct(grid)}</span></div>
+        ${battery>0?`<div class="ttrow"><span class="ttswatch battery"></span><span>Batterie</span><strong>${this._energy(battery)}</strong><span>${pct(battery)}</span></div>`:""}
+        <div class="tttotal"><span>Gesamt</span><span>${this._energy(total)}</span></div>`;
+      const margin=12,tw=280,th=tip.offsetHeight||155;
+      let left=e.clientX+14,top=e.clientY+14;
+      if(left+tw>window.innerWidth-margin)left=e.clientX-tw-14;
+      if(top+th>window.innerHeight-margin)top=e.clientY-th-14;
+      tip.style.left=`${Math.max(margin,left)}px`;tip.style.top=`${Math.max(margin,top)}px`;tip.classList.add("show");
+    });
+  }
+
+  _intervalLabel(startMs,endMs) {
+    const start=new Date(Number(startMs)),end=new Date(Number(endMs));
+    const sameDay=start.toDateString()===end.toDateString();
+    const date=new Intl.DateTimeFormat(undefined,{weekday:"short",day:"2-digit",month:"2-digit",year:"numeric"}).format(start);
+    const tf=new Intl.DateTimeFormat(undefined,{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    return sameDay?`${date} · ${tf.format(start)} – ${tf.format(end)}`:`${this._dateTime(startMs)} – ${this._dateTime(endMs)}`;
   }
 
   _navigate(path) {
@@ -657,6 +712,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
   _diagRow(label,value){return `<div class="diagrow"><span class="muted">${label}</span><strong>${value}</strong></div>`;}
   _pct(v){return v==null?"–":`${(Number(v)*100).toFixed(1)} %`;}
   _w(v){return v==null?"–":`${Number(v).toFixed(1)} W`;}
+  _seconds(v){return v==null?"–":`${Number(v).toFixed(Number(v)<10?2:1)} s`;}
   _energy(kwh){kwh=Number(kwh||0);return kwh<1?`${(kwh*1000).toFixed(kwh<.1?1:0)} Wh`:`${kwh.toFixed(kwh<10?3:2)} kWh`;}
   _energyShort(kwh){kwh=Number(kwh||0);return kwh<1?`${Math.round(kwh*1000)}Wh`:`${kwh.toFixed(1)}kWh`;}
   _bytes(value){const n=Math.max(0,Number(value||0));if(n<1024)return `${Math.round(n)} B`;if(n<1048576)return `${(n/1024).toFixed(n<10240?1:0)} KB`;if(n<1073741824)return `${(n/1048576).toFixed(n<10485760?1:0)} MB`;return `${(n/1073741824).toFixed(2)} GB`;}

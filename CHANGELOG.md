@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.5
+
+- Neue optionale Messwert-Synchronisierung für asynchron meldende Netz-, Verbraucher- und PV-Sensoren.
+- WattWer puffert Live-Messwerte mit ihrem Home-Assistant-`last_reported`-Zeitstempel und rechnet standardmäßig 5 Sekunden verzögert auf einen gemeinsamen Zielzeitpunkt.
+- Sample-and-Hold: Für jeden Zielzeitpunkt wird ausschließlich der letzte gemeldete Messwert vor oder genau am Zielzeitpunkt verwendet; zukünftige Messwerte werden nicht rückwirkend vorgezogen.
+- Synchronisierungsparameter (aktiv, Verzögerung, Puffer, maximales Sample-Alter) sind im WattWer-Konfigurationspanel editierbar.
+- Neue Live- und 15-Minuten-Diagnosen für Messwertspreizung und Sample-Alter.
+- Das Verlaufsdiagramm zeigt beim Überfahren eines Balkens ein WattWer-Tooltip mit Zeitfenster, Datenabdeckung, Gesamt-, PV-, Netz- und Batterieenergie sowie Prozentanteilen.
+- Keine Telemetrie oder Entwickler-Tracking hinzugefügt.
+- Keine Änderung an Domain, Config Entry, Verbraucher-/Erzeuger-IDs, Gruppen oder bestehenden Statistik-Unique-IDs.
+
 ## 0.5.4
 
 - Interner WattWer-Runtime-Zustand wird nur noch alle 5 Minuten gespeichert statt jede Minute.

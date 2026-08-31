@@ -1,6 +1,7 @@
 """Sampling, allocation and persistence for PV Energy Allocation."""
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
@@ -12,7 +13,11 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Event, HomeAssistant, State, callback
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_state_report_event,
+    async_track_time_interval,
+)
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -29,6 +34,10 @@ from .const import (
     CONF_MAX_AGE,
     CONF_QUARTER_RETENTION_DAYS,
     CONF_SAMPLE_INTERVAL,
+    CONF_SYNC_ENABLED,
+    CONF_SYNC_DELAY,
+    CONF_SYNC_BUFFER,
+    CONF_SYNC_MAX_SAMPLE_AGE,
     DEFAULTS,
     DOMAIN,
     GENERATOR_ROLE_DIRECT_CONSUMER,
@@ -54,6 +63,11 @@ def _new_bucket(start: float, consumer_ids) -> dict[str, Any]:
         "balance_ws": 0.0,
         "house_net_error_ws": 0.0,
         "diag_coverage": 0.0,
+        "sync_spread_ss": 0.0,
+        "sync_max_age_ss": 0.0,
+        "sync_diag_coverage": 0.0,
+        "sync_spread_max_s": 0.0,
+        "sync_sample_age_max_s": 0.0,
     }
 
 
@@ -75,6 +89,10 @@ class PVAllocationController:
         self.sample_interval = int(self.cfg.get(CONF_SAMPLE_INTERVAL, DEFAULTS[CONF_SAMPLE_INTERVAL]))
         self.max_age = float(self.cfg.get(CONF_MAX_AGE, DEFAULTS[CONF_MAX_AGE]))
         self.deadband = float(self.cfg.get(CONF_DEADBAND, DEFAULTS[CONF_DEADBAND]))
+        self.sync_enabled = bool(self.cfg.get(CONF_SYNC_ENABLED, DEFAULTS[CONF_SYNC_ENABLED]))
+        self.sync_delay = max(0.0, float(self.cfg.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY])))
+        self.sync_buffer = max(10.0, float(self.cfg.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER])))
+        self.sync_max_sample_age = max(2.0, float(self.cfg.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE])))
         self.q_retention_days = int(
             self.cfg.get(CONF_QUARTER_RETENTION_DAYS, DEFAULTS[CONF_QUARTER_RETENTION_DAYS])
         )
@@ -104,6 +122,23 @@ class PVAllocationController:
             gid: item for gid, item in self.all_generators.items() if item.get("enabled", True)
         }
 
+        # Live measurements are buffered by their Home Assistant report timestamp.
+        # The allocation is calculated a few seconds behind wall-clock time and
+        # uses only the latest sample at or before that target timestamp. This
+        # prevents a fast SHM update from being mixed with a later Shelly update.
+        self._measurement_buffer: dict[str, deque[tuple[float, float | None]]] = {}
+        generator_ages = [
+            float(item.get("max_age", 180.0))
+            for item in self.generators.values()
+            if item.get("enabled", True)
+        ]
+        self._buffer_retention = max(
+            self.sync_buffer,
+            self.max_age,
+            self.sync_max_sample_age,
+            *(generator_ages or [0.0]),
+        ) + self.sync_delay + max(5.0, float(self.sample_interval))
+
         self._store = Store[dict[str, Any]](
             hass,
             STORAGE_VERSION,
@@ -131,12 +166,20 @@ class PVAllocationController:
             "main_bus_sink_w": None,
             "direct_bkw_fw_w": None,
             "grid_net_w": None,
+            "sync_enabled": self.sync_enabled,
+            "sync_delay_s": self.sync_delay,
+            "sync_method": "last_reported_sample_hold" if self.sync_enabled else "current_state",
+            "sync_target_ms": None,
+            "sync_spread_s": None,
+            "sync_max_sample_age_s": None,
+            "sync_sample_count": 0,
+            "sync_quality": "warming_up" if self.sync_enabled else "disabled",
         }
 
         self.lifetime = _empty_values(self.all_consumers)
         self.last_15m: dict[str, Any] | None = None
         self.coverage_lifetime_s = 0.0
-        now = datetime.now(UTC).timestamp()
+        now = datetime.now(UTC).timestamp() - (self.sync_delay if self.sync_enabled else 0.0)
         self.bucket_15m = _new_bucket(self._quarter_start(now), self.all_consumers)
         self.bucket_hour = _new_bucket(self._hour_start(now), self.all_consumers)
         self.bucket_day = _new_bucket(self._day_start(now), self.all_consumers)
@@ -169,19 +212,125 @@ class PVAllocationController:
             "last_sample_ts": self._last_sample_ts,
         }
 
+    @callback
+    def _tracked_live_entities(self) -> list[str]:
+        """Return entities whose reports are buffered for synchronized live sampling."""
+        ids = self.required_history_entities()
+        house_net = str(self.cfg.get(CONF_HOUSE_NET) or "").strip()
+        if house_net:
+            ids.append(house_net)
+        return list(dict.fromkeys(x for x in ids if x))
+
+    @callback
+    def _buffer_state(self, entity_id: str, state: State | None, reported_at: datetime | None = None) -> None:
+        """Store one reported state, including unavailable markers, by report time."""
+        if not self.sync_enabled or not entity_id:
+            return
+        when = reported_at
+        if when is None and state is not None:
+            when = state.last_reported
+        if when is None:
+            when = datetime.now(UTC)
+        ts = dt_util.as_utc(when).timestamp()
+        value: float | None = None
+        if state is not None and state.state not in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            value = _finite_float(state.state)
+        queue = self._measurement_buffer.setdefault(entity_id, deque())
+        sample = (ts, value)
+        if queue and abs(queue[-1][0] - ts) < 1e-6:
+            queue[-1] = sample
+        elif not queue or queue[-1][0] < ts:
+            queue.append(sample)
+        else:
+            items = list(queue)
+            items.append(sample)
+            items.sort(key=lambda item: item[0])
+            queue.clear()
+            queue.extend(items)
+        cutoff = datetime.now(UTC).timestamp() - self._buffer_retention
+        while len(queue) > 1 and queue[1][0] < cutoff:
+            queue.popleft()
+
+    @callback
+    def _async_state_changed(self, event: Event) -> None:
+        state = event.data.get("new_state")
+        entity_id = str(event.data.get("entity_id") or "")
+        reported_at = state.last_reported if state is not None else event.time_fired
+        self._buffer_state(entity_id, state, reported_at)
+
+    @callback
+    def _async_state_reported(self, event: Event) -> None:
+        state = event.data.get("new_state")
+        entity_id = str(event.data.get("entity_id") or "")
+        reported_at = event.data.get("last_reported")
+        self._buffer_state(entity_id, state, reported_at)
+
+    def _seed_measurement_buffer(self) -> None:
+        """Seed buffers with the latest known HA states before event tracking starts."""
+        if not self.sync_enabled:
+            return
+        for entity_id in self._tracked_live_entities():
+            state = self.hass.states.get(entity_id)
+            if state is not None:
+                self._buffer_state(entity_id, state, state.last_reported)
+
+    def _buffer_candidate(
+        self, entity_id: str | None, target_ts: float, *, max_age: float
+    ) -> tuple[float | None, float | None, float | None]:
+        """Return latest buffered value at/before target, its age and timestamp."""
+        if not entity_id:
+            return None, None, None
+        queue = self._measurement_buffer.get(entity_id)
+        if not queue:
+            return None, None, None
+        for sample_ts, value in reversed(queue):
+            if sample_ts <= target_ts + 1e-6:
+                age = max(0.0, target_ts - sample_ts)
+                if value is None or age > max_age:
+                    return None, age, sample_ts
+                return value, age, sample_ts
+        return None, None, None
+
+    @staticmethod
+    def _sync_quality(spread: float | None, max_age: float | None, enabled: bool) -> str:
+        if not enabled:
+            return "disabled"
+        if spread is None or max_age is None:
+            return "warming_up"
+        worst = max(spread, max_age)
+        if worst < 2.0:
+            return "excellent"
+        if worst < 5.0:
+            return "good"
+        if worst < 10.0:
+            return "fair"
+        return "poor"
+
     async def async_start(self) -> None:
         """Load persisted state and start periodic sampling."""
         stored = await self._store.async_load()
         if isinstance(stored, dict):
             self._restore(stored)
 
-        now_ts = datetime.now(UTC).timestamp()
-        if self._last_sample_ts is not None and now_ts > self._last_sample_ts:
-            # Never invent energy for a Home Assistant outage. We do close elapsed
-            # buckets so their coverage explicitly reports the missing interval.
-            self._advance_interval(self._last_sample_ts, now_ts, None, None)
-        self._last_sample_ts = now_ts
-        self._last_allocation, self._last_diag = self._calculate_snapshot(datetime.now(UTC))
+        self._seed_measurement_buffer()
+        if self.sync_enabled:
+            tracked = self._tracked_live_entities()
+            self._unsubs.append(
+                async_track_state_change_event(self.hass, tracked, self._async_state_changed)
+            )
+            self._unsubs.append(
+                async_track_state_report_event(self.hass, tracked, self._async_state_reported)
+            )
+
+        wall_now = datetime.now(UTC)
+        target_now = wall_now - timedelta(seconds=self.sync_delay if self.sync_enabled else 0.0)
+        target_ts = target_now.timestamp()
+        if self._last_sample_ts is not None and target_ts > self._last_sample_ts:
+            # Never invent energy for a Home Assistant outage. The synchronized
+            # time axis is delayed, so the gap is closed only up to its target time.
+            self._advance_interval(self._last_sample_ts, target_ts, None, None)
+        self._last_sample_ts = target_ts
+        self._last_allocation, self._last_diag = self._calculate_snapshot(target_now)
 
         self._unsubs.append(
             async_track_time_interval(
@@ -229,7 +378,7 @@ class PVAllocationController:
         except (TypeError, ValueError):
             self.coverage_lifetime_s = 0.0
 
-        now_ts = datetime.now(UTC).timestamp()
+        now_ts = datetime.now(UTC).timestamp() - (self.sync_delay if self.sync_enabled else 0.0)
         self.bucket_15m = self._restore_bucket(stored.get("bucket_15m"), self._quarter_start(now_ts))
         self.bucket_hour = self._restore_bucket(stored.get("bucket_hour"), self._hour_start(now_ts))
         self.bucket_day = self._restore_bucket(stored.get("bucket_day"), self._day_start(now_ts))
@@ -247,6 +396,11 @@ class PVAllocationController:
         bucket["balance_ws"] = float(raw.get("balance_ws", 0.0))
         bucket["house_net_error_ws"] = float(raw.get("house_net_error_ws", 0.0))
         bucket["diag_coverage"] = max(0.0, float(raw.get("diag_coverage", 0.0)))
+        bucket["sync_spread_ss"] = float(raw.get("sync_spread_ss", 0.0))
+        bucket["sync_max_age_ss"] = float(raw.get("sync_max_age_ss", 0.0))
+        bucket["sync_diag_coverage"] = max(0.0, float(raw.get("sync_diag_coverage", 0.0)))
+        bucket["sync_spread_max_s"] = max(0.0, float(raw.get("sync_spread_max_s", 0.0)))
+        bucket["sync_sample_age_max_s"] = max(0.0, float(raw.get("sync_sample_age_max_s", 0.0)))
         values = raw.get("values", {})
         for cid in self.all_consumers:
             for source in SOURCES:
@@ -305,31 +459,31 @@ class PVAllocationController:
         self._save_task = self.hass.async_create_task(self._async_save_state())
 
     async def _async_tick(self, now: datetime) -> None:
-        now_utc = dt_util.as_utc(now)
-        now_ts = now_utc.timestamp()
+        wall_now = dt_util.as_utc(now)
+        target_now = wall_now - timedelta(seconds=self.sync_delay if self.sync_enabled else 0.0)
+        target_ts = target_now.timestamp()
         if self._last_sample_ts is None:
-            self._last_sample_ts = now_ts
-            self._last_allocation, self._last_diag = self._calculate_snapshot(now_utc)
+            self._last_sample_ts = target_ts
+            self._last_allocation, self._last_diag = self._calculate_snapshot(target_now)
             return
 
-        dt_s = now_ts - self._last_sample_ts
+        dt_s = target_ts - self._last_sample_ts
         # A very large event-loop gap should not turn stale power into fictitious
         # energy. The same max_age used for source freshness is the upper bound.
         if dt_s <= 0:
-            self._last_sample_ts = now_ts
             return
         if dt_s > self.max_age:
-            self._advance_interval(self._last_sample_ts, now_ts, None, None)
+            self._advance_interval(self._last_sample_ts, target_ts, None, None)
         else:
             self._advance_interval(
                 self._last_sample_ts,
-                now_ts,
+                target_ts,
                 self._last_allocation,
                 self._last_diag if self._last_allocation is not None else None,
             )
 
-        self._last_sample_ts = now_ts
-        self._last_allocation, self._last_diag = self._calculate_snapshot(now_utc)
+        self._last_sample_ts = target_ts
+        self._last_allocation, self._last_diag = self._calculate_snapshot(target_now)
 
     def _read_power(
         self,
@@ -338,44 +492,58 @@ class PVAllocationController:
         *,
         required: bool,
         max_age: float | None = None,
-    ) -> tuple[float | None, str | None]:
-        """Read one power sensor with freshness validation.
+    ) -> tuple[float | None, str | None, float | None, float | None]:
+        """Read one power sensor at the synchronized target timestamp.
 
-        Optional diagnostics must never invalidate the allocation.  A configured
-        optional entity may legitimately be unavailable (for example a PV
-        inverter that powers down at night), so failures are only returned for
-        required inputs.
+        Returns value, invalid entity id, sample timestamp and sample age.
+        Optional diagnostics never invalidate the allocation.
         """
         if not entity_id:
-            return (None, None if not required else "<not configured>")
+            return (None, None if not required else "<not configured>", None, None)
+        freshness = self.max_age if max_age is None else max_age
+        if self.sync_enabled:
+            # Required live sources use the stricter synchronization age; slow
+            # generator sources pass their own larger max_age explicitly.
+            if max_age is None:
+                freshness = min(freshness, self.sync_max_sample_age)
+            value, age, sample_ts = self._buffer_candidate(
+                entity_id, now.timestamp(), max_age=freshness
+            )
+            if value is None:
+                return (None, entity_id if required else None, sample_ts, age)
+            return value, None, sample_ts, age
+
         state: State | None = self.hass.states.get(entity_id)
         if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-            return (None, entity_id if required else None)
+            return (None, entity_id if required else None, None, None)
         value = _finite_float(state.state)
         if value is None:
-            return (None, entity_id if required else None)
-        freshness = self.max_age if max_age is None else max_age
-        age = (now - dt_util.as_utc(state.last_reported)).total_seconds()
+            return (None, entity_id if required else None, None, None)
+        sample_ts = dt_util.as_utc(state.last_reported).timestamp()
+        age = max(0.0, (now.timestamp() - sample_ts))
         if age > freshness:
-            return (None, entity_id if required else None)
-        return value, None
+            return (None, entity_id if required else None, sample_ts, age)
+        return value, None, sample_ts, age
 
     def _power_candidate(
         self, entity_id: str | None, now: datetime, *, max_age: float
-    ) -> tuple[float | None, float | None]:
-        """Return a numeric power value and its report age if still usable."""
+    ) -> tuple[float | None, float | None, float | None]:
+        """Return a usable power value, report age and report timestamp."""
         if not entity_id:
-            return None, None
+            return None, None, None
+        if self.sync_enabled:
+            return self._buffer_candidate(entity_id, now.timestamp(), max_age=max_age)
         state: State | None = self.hass.states.get(entity_id)
         if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-            return None, None
+            return None, None, None
         value = _finite_float(state.state)
         if value is None:
-            return None, None
-        age = max(0.0, (now - dt_util.as_utc(state.last_reported)).total_seconds())
+            return None, None, None
+        sample_ts = dt_util.as_utc(state.last_reported).timestamp()
+        age = max(0.0, now.timestamp() - sample_ts)
         if age > max_age:
-            return None, age
-        return value, age
+            return None, age, sample_ts
+        return value, age, sample_ts
 
     def _sun_below_horizon(self) -> bool:
         """Return True only when Home Assistant positively knows it is night."""
@@ -384,39 +552,39 @@ class PVAllocationController:
 
     def _read_generator_resilient(
         self, generator: dict[str, Any], now: datetime
-    ) -> tuple[float | None, str, list[str], str | None]:
+    ) -> tuple[float | None, str, list[str], str | None, float | None, float | None]:
         """Read one PV generator with fallback and optional night-zero handling."""
         try:
             grace = max(self.max_age, float(generator.get("max_age", 180.0)))
         except (TypeError, ValueError):
             grace = max(self.max_age, 180.0)
 
-        candidates: list[tuple[float, float, str]] = []
+        candidates: list[tuple[float, float, str, float]] = []
         primary_id = str(generator.get("entity_id") or "").strip()
         fallback_id = str(generator.get("fallback_entity_id") or "").strip()
-        primary, primary_age = self._power_candidate(primary_id, now, max_age=grace)
-        if primary is not None and primary_age is not None:
-            candidates.append((primary_age, primary, primary_id))
-        fallback, fallback_age = self._power_candidate(fallback_id, now, max_age=grace)
-        if fallback is not None and fallback_age is not None:
-            candidates.append((fallback_age, fallback, fallback_id))
+        primary, primary_age, primary_ts = self._power_candidate(primary_id, now, max_age=grace)
+        if primary is not None and primary_age is not None and primary_ts is not None:
+            candidates.append((primary_age, primary, primary_id, primary_ts))
+        fallback, fallback_age, fallback_ts = self._power_candidate(fallback_id, now, max_age=grace)
+        if fallback is not None and fallback_age is not None and fallback_ts is not None:
+            candidates.append((fallback_age, fallback, fallback_id, fallback_ts))
 
         if candidates:
-            _age, value, source = min(candidates, key=lambda item: item[0])
+            age, value, source, sample_ts = min(candidates, key=lambda item: item[0])
             if fallback_id and source == fallback_id:
                 return value, "fallback_generator", [
                     f"{generator.get('name', primary_id)}: Fallback-Sensor verwendet"
-                ], source
-            return value, "ok", [], source
+                ], source, sample_ts, age
+            return value, "ok", [], source, sample_ts, age
 
         if bool(generator.get("night_zero", True)) and self._sun_below_horizon():
             return 0.0, "fallback_night_zero", [
                 f"{generator.get('name', primary_id)}: nachts ohne Messwert als 0 W behandelt"
-            ], None
+            ], None, None, None
 
         return None, "degraded_generator", [
             f"{generator.get('name', primary_id)}: Erzeugungsleistung unbekannt"
-        ], None
+        ], None, None, None
 
     def _positive(self, value: float) -> float:
         if value <= self.deadband:
@@ -547,6 +715,14 @@ class PVAllocationController:
         stale: list[str] = []
         quality = "ok"
         quality_notes: list[str] = []
+        sample_times: list[float] = []
+        sample_ages: list[float] = []
+
+        def note_timing(sample_ts: float | None, age: float | None) -> None:
+            if sample_ts is not None:
+                sample_times.append(float(sample_ts))
+            if age is not None:
+                sample_ages.append(max(0.0, float(age)))
 
         required_ids = {
             "grid_import": self.cfg.get(CONF_GRID_IMPORT),
@@ -557,7 +733,8 @@ class PVAllocationController:
 
         values: dict[str, float] = {}
         for key, entity_id in required_ids.items():
-            val, bad = self._read_power(entity_id, now, required=True)
+            val, bad, sample_ts, age = self._read_power(entity_id, now, required=True)
+            note_timing(sample_ts, age)
             if bad:
                 stale.append(bad)
             elif val is not None:
@@ -565,7 +742,8 @@ class PVAllocationController:
 
         backgrounds: list[float] = []
         for entity_id in list(self.cfg.get(CONF_BACKGROUND_LOADS) or []):
-            val, bad = self._read_power(entity_id, now, required=True)
+            val, bad, sample_ts, age = self._read_power(entity_id, now, required=True)
+            note_timing(sample_ts, age)
             if bad:
                 stale.append(bad)
             elif val is not None:
@@ -573,8 +751,19 @@ class PVAllocationController:
 
         generator_readings: dict[str, dict[str, Any]] = {}
         for gid, generator in self.generators.items():
-            value, gen_quality, notes, source_entity = self._read_generator_resilient(generator, now)
+            value, gen_quality, notes, source_entity, sample_ts, age = (
+                self._read_generator_resilient(generator, now)
+            )
             known = value is not None
+            # Main-bus PV is diagnostic-only while no battery is configured;
+            # do not let a slow inverter skew synchronization quality in that
+            # mode. Direct-consumer PV affects the allocation and all PV becomes
+            # allocation-critical once battery discharge must be separated.
+            if known and source_entity and (
+                self.battery_enabled
+                or generator.get("role") == GENERATOR_ROLE_DIRECT_CONSUMER
+            ):
+                note_timing(sample_ts, age)
             if not known and self.battery_enabled:
                 stale.append(str(generator.get("entity_id") or gid))
             elif gen_quality != "ok":
@@ -594,12 +783,14 @@ class PVAllocationController:
         battery_charge = 0.0
         battery_discharge = 0.0
         if self.battery_enabled:
-            charge, bad_charge = self._read_power(
+            charge, bad_charge, charge_ts, charge_age = self._read_power(
                 self.cfg.get(CONF_BATTERY_CHARGE), now, required=True
             )
-            discharge, bad_discharge = self._read_power(
+            discharge, bad_discharge, discharge_ts, discharge_age = self._read_power(
                 self.cfg.get(CONF_BATTERY_DISCHARGE), now, required=True
             )
+            note_timing(charge_ts, charge_age)
+            note_timing(discharge_ts, discharge_age)
             if bad_charge:
                 stale.append(bad_charge)
             if bad_discharge:
@@ -609,9 +800,23 @@ class PVAllocationController:
             if discharge is not None:
                 battery_discharge = self._positive(discharge)
 
+        spread = max(sample_times) - min(sample_times) if len(sample_times) >= 2 else (0.0 if sample_times else None)
+        max_sample_age = max(sample_ages) if sample_ages else None
+        timing_diag = {
+            "sync_enabled": self.sync_enabled,
+            "sync_delay_s": self.sync_delay if self.sync_enabled else 0.0,
+            "sync_method": "last_reported_sample_hold" if self.sync_enabled else "current_state",
+            "sync_target_ms": int(now.timestamp() * 1000),
+            "sync_spread_s": spread,
+            "sync_max_sample_age_s": max_sample_age,
+            "sync_sample_count": len(sample_times),
+            "sync_quality": self._sync_quality(spread, max_sample_age, self.sync_enabled),
+        }
+
         if stale:
             return None, {
                 **self._last_diag,
+                **timing_diag,
                 "valid": False,
                 "quality": "invalid",
                 "quality_notes": quality_notes,
@@ -620,9 +825,11 @@ class PVAllocationController:
 
         house_net = None
         if self.cfg.get(CONF_HOUSE_NET):
-            house_net, _ = self._read_power(self.cfg.get(CONF_HOUSE_NET), now, required=False)
+            house_net, _bad, _ts, _age = self._read_power(
+                self.cfg.get(CONF_HOUSE_NET), now, required=False
+            )
 
-        return self._compute_allocation(
+        allocation, diag = self._compute_allocation(
             values,
             backgrounds,
             generator_readings,
@@ -632,6 +839,8 @@ class PVAllocationController:
             quality=quality,
             quality_notes=quality_notes,
         )
+        diag.update(timing_diag)
+        return allocation, diag
 
     def _compute_allocation(
         self,
@@ -842,9 +1051,24 @@ class PVAllocationController:
             if house_err is not None:
                 bucket["house_net_error_ws"] += float(house_err) * seconds
             bucket["diag_coverage"] += seconds
+            sync_spread = diag.get("sync_spread_s")
+            sync_age = diag.get("sync_max_sample_age_s")
+            if sync_spread is not None and sync_age is not None:
+                spread_f = max(0.0, float(sync_spread))
+                age_f = max(0.0, float(sync_age))
+                bucket["sync_spread_ss"] += spread_f * seconds
+                bucket["sync_max_age_ss"] += age_f * seconds
+                bucket["sync_diag_coverage"] += seconds
+                bucket["sync_spread_max_s"] = max(
+                    float(bucket.get("sync_spread_max_s", 0.0)), spread_f
+                )
+                bucket["sync_sample_age_max_s"] = max(
+                    float(bucket.get("sync_sample_age_max_s", 0.0)), age_f
+                )
 
     def _record_from_bucket(self, bucket: dict[str, Any], duration: float) -> dict[str, Any]:
         diag_cov = float(bucket.get("diag_coverage", 0.0))
+        sync_cov = float(bucket.get("sync_diag_coverage", 0.0))
         return {
             "start": int(round(float(bucket["start"]) * 1000)),
             "duration": int(duration),
@@ -854,6 +1078,21 @@ class PVAllocationController:
             ),
             "house_net_error_avg_w": (
                 float(bucket["house_net_error_ws"]) / diag_cov if diag_cov > 0 else None
+            ),
+            "sync_spread_avg_s": (
+                float(bucket.get("sync_spread_ss", 0.0)) / sync_cov if sync_cov > 0 else None
+            ),
+            "sync_max_sample_age_avg_s": (
+                float(bucket.get("sync_max_age_ss", 0.0)) / sync_cov if sync_cov > 0 else None
+            ),
+            "sync_spread_max_s": (
+                float(bucket.get("sync_spread_max_s", 0.0)) if sync_cov > 0 else None
+            ),
+            "sync_sample_age_max_s": (
+                float(bucket.get("sync_sample_age_max_s", 0.0)) if sync_cov > 0 else None
+            ),
+            "sync_diagnostic_coverage": (
+                min(max(sync_cov / duration, 0.0), 1.0) if duration > 0 else 0.0
             ),
             "values": deepcopy(bucket["values"]),
         }

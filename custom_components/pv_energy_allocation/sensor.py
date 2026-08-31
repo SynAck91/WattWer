@@ -167,6 +167,33 @@ class LastQuarterCoverageSensor(AllocationBaseSensor):
         return float(self.controller.last_15m["coverage"]) * 100.0
 
 
+
+
+class LastQuarterSecondsDiagnosticSensor(AllocationBaseSensor):
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        controller: PVAllocationController,
+        key: str,
+        name: str,
+    ) -> None:
+        super().__init__(entry, controller)
+        self.key = key
+        self._attr_name = name
+        self._attr_unique_id = f"{entry.entry_id}_{key}_last_15m"
+
+    @property
+    def native_value(self) -> float | None:
+        if not self.controller.last_15m:
+            return None
+        value = self.controller.last_15m.get(self.key)
+        return float(value) if value is not None else None
+
 class LastQuarterDiagnosticSensor(AllocationBaseSensor):
     _attr_device_class = SensorDeviceClass.POWER
     _attr_native_unit_of_measurement = UnitOfPower.WATT
@@ -232,7 +259,31 @@ async def async_setup_entry(
                 entry,
                 controller,
                 "house_net_error_avg_w",
-                "strom_gesamt Abweichung Ø letzte 15 min",
+                "Summensensor Abweichung Ø letzte 15 min",
+            ),
+            LastQuarterSecondsDiagnosticSensor(
+                entry,
+                controller,
+                "sync_spread_avg_s",
+                "Synchronitätsdifferenz Ø letzte 15 min",
+            ),
+            LastQuarterSecondsDiagnosticSensor(
+                entry,
+                controller,
+                "sync_spread_max_s",
+                "Synchronitätsdifferenz max. letzte 15 min",
+            ),
+            LastQuarterSecondsDiagnosticSensor(
+                entry,
+                controller,
+                "sync_max_sample_age_avg_s",
+                "Sample-Alter Ø letzte 15 min",
+            ),
+            LastQuarterSecondsDiagnosticSensor(
+                entry,
+                controller,
+                "sync_sample_age_max_s",
+                "Sample-Alter max. letzte 15 min",
             ),
         ]
     )

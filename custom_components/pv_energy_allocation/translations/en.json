@@ -18,14 +18,19 @@
           "max_age": "Maximum sensor age (s)",
           "deadband": "Deadband (W)",
           "quarter_retention_days": "15-minute auto resolution (days)",
-          "hour_retention_days": "Hourly auto resolution (days)"
+          "hour_retention_days": "Hourly auto resolution (days)",
+          "sync_enabled": "Synchronize asynchronous measurements",
+          "sync_delay": "Synchronization delay (s)",
+          "sync_buffer": "Measurement buffer (s)",
+          "sync_max_sample_age": "Maximum synchronized sample age (s)"
         }
       }
     },
     "error": {
       "battery_pair_required": "Battery charge and discharge sensors must be configured together.",
       "battery_requires_generator": "Configure at least one PV generator before enabling battery allocation.",
-      "source_overlap": "The same entity cannot be used simultaneously as grid source, consumer, PV generator or background load."
+      "source_overlap": "The same entity cannot be used simultaneously as grid source, consumer, PV generator or background load.",
+      "sync_buffer_too_small": "Measurement buffer must be at least synchronization delay + maximum synchronized sample age."
     },
     "abort": {
       "single_instance_allowed": "Only one WattWer instance is allowed."

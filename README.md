@@ -34,6 +34,8 @@ Wenn dir WattWer hilft und du die Weiterentwicklung unterstützen möchtest:
 - konfigurierbare Sensor-Frische je PV-Erzeuger
 - optionaler Nacht-Fallback auf 0 W
 - getrennte PV-/Netz-/Batterie-Energie
+- synchronisierte Live-Zuordnung asynchron meldender Sensoren über zeitgestempelten Messwertpuffer und Sample-and-Hold
+- Diagnose der aktuellen Messwertspreizung und des Sample-Alters
 - feste 15-Minuten-Auswertung
 - Home-Assistant Long-Term Statistics über kumulative Energie-Sensoren
 - historischer Backfill aus noch vorhandenen Recorder-Rohdaten
@@ -57,6 +59,16 @@ Mit Batterie:
 ```text
 Gesamtenergie = PV-Energie + Netzenergie + Batterieenergie
 ```
+
+## Messwert-Synchronisierung
+
+Netzzähler, Shellys und Wechselrichter melden ihre Werte in Home Assistant nicht zwingend im selben Moment. WattWer kann die Live-Messwerte deshalb zeitlich ausrichten. Jeder gemeldete Wert wird zusammen mit seinem Home-Assistant-Zeitstempel gepuffert; die Berechnung läuft standardmäßig **5 Sekunden hinter der Echtzeit** und verwendet für den gemeinsamen Zielzeitpunkt jeweils den letzten gemeldeten Wert **vor oder genau an diesem Zeitpunkt**.
+
+Diese Sample-and-Hold-Methode vermeidet insbesondere, dass ein neuer Netzleistungswert mit einem erst später eintreffenden Verbraucherwert vermischt oder ein zukünftiger Lastsprung rückwirkend vorgezogen wird. Standardwerte: 5 s Verzögerung, 30 s Puffer und 10 s maximales Sample-Alter für normale Quellen. Langsamere PV-Erzeuger können weiterhin ihr eigenes größeres Sensoralter besitzen. Die Synchronisierung und ihre Parameter lassen sich unter **WattWer → Allgemein → Messwert-Synchronisierung** ändern.
+
+Im Dashboard zeigt WattWer zusätzlich die aktuelle Synchronitätsqualität, Messwertspreizung und das Alter des ältesten verwendeten Samples. Eine echte Hardware-Zeitsynchronisation der Messgeräte kann WattWer damit nicht erzeugen; die zeitliche Zuordnung in Home Assistant wird jedoch konsistenter.
+
+Das Verlaufsdiagramm bietet außerdem ein interaktives Tooltip beim Überfahren eines Balkens mit Zeitfenster, Datenabdeckung, Gesamtenergie, PV-/Netz-/Batterieenergie und den jeweiligen Anteilen.
 
 ## Installation über HACS
 
@@ -105,7 +117,7 @@ Beim Wechsel eines Wechselrichters sollte der bestehende PV-Erzeuger bearbeitet 
 
 ## Update von WattWer 0.1–0.4
 
-WattWer 0.5.4 enthält weiterhin die automatische Migration aus älteren WattWer-Versionen.
+WattWer 0.5.5 enthält weiterhin die automatische Migration aus älteren WattWer-Versionen.
 
 **Wichtig: Die bestehende Integration vor dem Update nicht löschen.**
 
@@ -203,6 +215,8 @@ If WattWer is useful to you and you would like to support further development:
 - configurable sensor freshness per PV generator
 - optional night fallback to 0 W
 - separate PV, grid, and battery energy
+- synchronized live allocation for asynchronously reporting sensors using a timestamped buffer and sample-and-hold
+- diagnostics for current measurement spread and sample age
 - fixed 15-minute evaluation windows
 - Home Assistant Long-Term Statistics through cumulative energy sensors
 - historical backfill from raw Recorder data that is still available
@@ -226,6 +240,16 @@ With a battery:
 ```text
 Total energy = PV energy + grid energy + battery energy
 ```
+
+## Measurement synchronization
+
+Grid meters, Shelly devices, and inverters do not necessarily report to Home Assistant at exactly the same time. WattWer can therefore align live measurements on a common target timestamp. Each report is buffered together with its Home Assistant timestamp; by default the allocation runs **5 seconds behind wall-clock time** and uses the most recent reported sample **at or before the target timestamp** for every source.
+
+This sample-and-hold approach avoids mixing a fresh grid value with a consumer value that arrives a few seconds later, and it never moves a future load step backwards in time. Defaults are a 5 s delay, 30 s buffer, and 10 s maximum sample age for normal sources. Slower PV generators may still use their own larger freshness limit. Synchronization can be configured under **WattWer → General → Measurement synchronization**.
+
+The dashboard also reports synchronization quality, current measurement spread, and the age of the oldest sample in use. WattWer cannot create true hardware-level clock synchronization between meters, but it can make the temporal allocation inside Home Assistant substantially more consistent.
+
+The history chart also provides an interactive hover tooltip showing the time interval, data coverage, total energy, PV/grid/battery energy, and source percentages.
 
 ## Installation via HACS
 
@@ -274,7 +298,7 @@ When replacing an inverter or meter, edit the existing PV generator and change o
 
 ## Updating from WattWer 0.1–0.4
 
-WattWer 0.5.4 continues to include automatic migration from older WattWer versions.
+WattWer 0.5.5 continues to include automatic migration from older WattWer versions.
 
 **Important: Do not delete the existing integration before updating.**
 

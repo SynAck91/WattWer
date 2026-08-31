@@ -18,14 +18,19 @@
           "max_age": "Maximales Sensoralter in Sekunden",
           "deadband": "Nullschwelle in Watt",
           "quarter_retention_days": "15-Minuten-Autoauflösung (Tage)",
-          "hour_retention_days": "Stunden-Autoauflösung (Tage)"
+          "hour_retention_days": "Stunden-Autoauflösung (Tage)",
+          "sync_enabled": "Asynchrone Messwerte synchronisieren",
+          "sync_delay": "Synchronisierungsverzögerung (s)",
+          "sync_buffer": "Messwertpuffer (s)",
+          "sync_max_sample_age": "Maximales synchronisiertes Sample-Alter (s)"
         }
       }
     },
     "error": {
       "battery_pair_required": "Batterie-Lade- und Entladesensor müssen gemeinsam konfiguriert werden.",
       "battery_requires_generator": "Vor Aktivierung der Batteriezuordnung muss mindestens ein PV-Erzeuger konfiguriert sein.",
-      "source_overlap": "Dieselbe Entity darf nicht gleichzeitig als Netzquelle, Verbraucher, PV-Erzeuger oder Hintergrundlast verwendet werden."
+      "source_overlap": "Dieselbe Entity darf nicht gleichzeitig als Netzquelle, Verbraucher, PV-Erzeuger oder Hintergrundlast verwendet werden.",
+      "sync_buffer_too_small": "Der Messwertpuffer muss mindestens Synchronisierungsverzögerung + maximales Sample-Alter abdecken."
     },
     "abort": {
       "single_instance_allowed": "WattWer kann nur einmal eingerichtet werden."

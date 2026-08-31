@@ -28,6 +28,10 @@ from .const import (
     CONF_MAX_AGE,
     CONF_QUARTER_RETENTION_DAYS,
     CONF_SAMPLE_INTERVAL,
+    CONF_SYNC_ENABLED,
+    CONF_SYNC_DELAY,
+    CONF_SYNC_BUFFER,
+    CONF_SYNC_MAX_SAMPLE_AGE,
     DEFAULT_GENERATOR_MAX_AGE,
     DEFAULTS,
     DOMAIN,
@@ -129,6 +133,10 @@ def ws_config(hass: HomeAssistant, connection: websocket_api.ActiveConnection, m
                     CONF_DEADBAND,
                     CONF_QUARTER_RETENTION_DAYS,
                     CONF_HOUR_RETENTION_DAYS,
+                    CONF_SYNC_ENABLED,
+                    CONF_SYNC_DELAY,
+                    CONF_SYNC_BUFFER,
+                    CONF_SYNC_MAX_SAMPLE_AGE,
                 )
             },
             "version": VERSION,
@@ -446,6 +454,10 @@ def _normalize_settings(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str
         settings[CONF_DEADBAND] = float(raw.get(CONF_DEADBAND, DEFAULTS[CONF_DEADBAND]))
         settings[CONF_QUARTER_RETENTION_DAYS] = int(raw.get(CONF_QUARTER_RETENTION_DAYS, DEFAULTS[CONF_QUARTER_RETENTION_DAYS]))
         settings[CONF_HOUR_RETENTION_DAYS] = int(raw.get(CONF_HOUR_RETENTION_DAYS, DEFAULTS[CONF_HOUR_RETENTION_DAYS]))
+        settings[CONF_SYNC_ENABLED] = bool(raw.get(CONF_SYNC_ENABLED, DEFAULTS[CONF_SYNC_ENABLED]))
+        settings[CONF_SYNC_DELAY] = float(raw.get(CONF_SYNC_DELAY, DEFAULTS[CONF_SYNC_DELAY]))
+        settings[CONF_SYNC_BUFFER] = float(raw.get(CONF_SYNC_BUFFER, DEFAULTS[CONF_SYNC_BUFFER]))
+        settings[CONF_SYNC_MAX_SAMPLE_AGE] = float(raw.get(CONF_SYNC_MAX_SAMPLE_AGE, DEFAULTS[CONF_SYNC_MAX_SAMPLE_AGE]))
     except (TypeError, ValueError):
         return None, "invalid_numeric_setting"
     if not 2 <= settings[CONF_SAMPLE_INTERVAL] <= 30:
@@ -458,6 +470,14 @@ def _normalize_settings(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, str
         return None, "invalid_quarter_retention"
     if not 31 <= settings[CONF_HOUR_RETENTION_DAYS] <= 3650:
         return None, "invalid_hour_retention"
+    if not 0 <= settings[CONF_SYNC_DELAY] <= 30:
+        return None, "invalid_sync_delay"
+    if not 10 <= settings[CONF_SYNC_BUFFER] <= 300:
+        return None, "invalid_sync_buffer"
+    if not 2 <= settings[CONF_SYNC_MAX_SAMPLE_AGE] <= 120:
+        return None, "invalid_sync_max_sample_age"
+    if settings[CONF_SYNC_ENABLED] and settings[CONF_SYNC_BUFFER] < settings[CONF_SYNC_DELAY] + settings[CONF_SYNC_MAX_SAMPLE_AGE]:
+        return None, "sync_buffer_too_small"
     if bool(settings[CONF_BATTERY_CHARGE]) != bool(settings[CONF_BATTERY_DISCHARGE]):
         return None, "battery_pair_required"
     return settings, None
