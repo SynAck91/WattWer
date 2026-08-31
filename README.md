@@ -1,80 +1,132 @@
-# PV-Energiezuordnung für Home Assistant
+# WattWer
 
-Custom Integration für die zeitgleiche Zuordnung von PV-, Netz- und zukünftig Batterieenergie zu mehreren Verbrauchern.
+WattWer ist eine Custom Integration für Home Assistant zur zeitgleichen Aufteilung elektrischer Verbraucher auf **PV**, **Netz** und optional **Batterie**.
 
-## Für diese Installation voreingestellte Sensoren
+Die Berechnung erfolgt auf Basis der aktuellen Leistungswerte in kurzen Intervallen (standardmäßig 5 s) und wird anschließend zu Energie in kWh integriert. Dadurch bleibt die zeitliche Korrelation zwischen Verbrauch und lokaler Erzeugung erhalten.
 
-- Netzbezug: `sensor.sunny_home_manager_2_metering_power_absorbed`
-- Netzeinspeisung: `sensor.sunny_home_manager_2_metering_power_supplied`
-- große PV: `sensor.sunny_tripower_x_20_pv_power`
-- Balkonkraftwerk: `sensor.fw_bkw_switch_0_power`
-- Kontrollwert BKW: `sensor.dtu_ac_leistung`
-- bestehender Netto-Haussensor: `sensor.strom_gesamt` (nur Diagnose)
-- AOR: `sensor.aor_total_active_power`
-- Wärmepumpe: `sensor.waermepumpe_total_active_power`
-- Allgemeinstrom: `sensor.allgemeinstrom_total_active_power`
-- Fachwerkhaus Bruttoverbrauch: `sensor.fw_shellypro3em_total_active_power`
-- weiterer Shelly: `sensor.shellypro3em_2cbcbbb187a4_total_active_power`
-- Garage: `sensor.garage_leistung` (nur Hintergrundlast im Quellenmix)
+## Funktionen
 
-## Berechnungsmodell
+- beliebig viele Verbraucher
+- frei änderbare Anzeigenamen und MDI-Icons
+- stabile interne Verbraucher-IDs für Statistik-Kontinuität
+- Verbrauchergruppen als reine Summenansicht
+- beliebig viele editierbare PV-Erzeuger
+- PV-Erzeuger am gemeinsamen Hauptbus oder lokal einem Verbraucher zugeordnet
+- optionaler Fallback-Leistungssensor je PV-Erzeuger
+- konfigurierbare Sensor-Frische je PV-Erzeuger
+- optionaler Nacht-Fallback auf 0 W
+- getrennte PV-/Netz-/Batterie-Energie
+- feste 15-Minuten-Auswertung
+- Home-Assistant Long-Term Statistics über kumulative Energie-Sensoren
+- historischer Backfill aus noch vorhandenen Recorder-Rohdaten
+- eigenes WattWer-Dashboard und eigenes Konfigurationspanel
+- vorbereitet für Batteriespeicher mit getrennten Lade-/Entlade-Leistungssensoren
 
-Die Integration liest die jeweils zuletzt gemeldeten Leistungssensoren in einem gemeinsamen Snapshot (Standard 5 s). Nur ausreichend frische numerische Zustände werden verwendet.
+## Berechnungsprinzip
 
-### FW / Balkonkraftwerk
+Für alle Verbraucher am gemeinsamen AC-Bus wird der zeitgleiche Quellenmix proportional angewendet. Ein Verbraucher mit doppelter Leistung erhält damit absolut doppelt so viel PV-Energie, aber denselben momentanen PV-Prozentsatz.
 
-Der FW-Shelly misst den Bruttoverbrauch. Das BKW liegt topologisch im FW-Zweig. Daher ist
+Ein lokal zugeordneter PV-Erzeuger ist eine Ausnahme: Seine Leistung deckt zuerst den elektrisch verknüpften Verbraucher. Nur der Überschuss fließt in den gemeinsamen Quellenmix. Diese Option sollte nur verwendet werden, wenn die Messpunkt-Topologie das tatsächlich hergibt.
 
-`BKW_direkt_FW = min(BKW_Leistung, FW_Bruttoverbrauch)`
+Ohne Batterie gilt für jeden Verbraucher:
 
-physikalisch innerhalb dieses Zweiges bestimmbar. Die verbleibende FW-Last nimmt am gemeinsamen Quellenmix des Hauptbusses teil; ein BKW-Überschuss wird zur PV-Quelle am Hauptbus.
+```text
+Gesamtenergie = PV-Energie + Netzenergie
+```
 
-### Hauptbus ohne Batterie
+Mit Batterie:
 
-`Netzanteil = Netto-Netzbezug / Hauptbus-Senkenleistung`, begrenzt auf 0…1.
+```text
+Gesamtenergie = PV-Energie + Netzenergie + Batterieenergie
+```
 
-Der verbleibende Anteil wird als lokale PV-Deckung behandelt. Die Zuordnung erfolgt pro Snapshot und wird erst danach zeitlich integriert.
+## Installation über HACS
 
-### Mit Sunny Island
+Dieses Repository erfüllt die HACS-Struktur für eine Custom Integration:
 
-Sobald sowohl Lade- als auch Entladeleistung konfiguriert sind, wird Batterieentladung als eigene Quelle geführt. Die Herkunft der vorher geladenen Energie wird absichtlich nicht rückwirkend als PV oder Netz umetikettiert.
+```text
+custom_components/pv_energy_allocation/
+hacs.json
+README.md
+```
 
-## Speicherung
+### Benutzerdefiniertes Repository
 
-- interne Integration mit Left-Hold über das Zeitintervall zwischen zwei Snapshots
-- feste Viertelstunden (UTC-Ausrichtung entspricht in Deutschland den lokalen Viertelstunden)
-- laufender Viertelstunden-/Tagesbucket und Lifetime-Zähler werden minütlich in einer kleinen `.storage`-Datei gesichert
-- die Integration schreibt **keine 5-Sekunden-Leistungszustände** in den Recorder
-- abgeschlossene 15-Minuten-Sensoren ändern sich nur viermal pro Stunde; ihre Detailhistorie folgt der normalen Recorder-Retention
-- kumulative kWh-Sensoren erzeugen native Home-Assistant Long-Term Statistics; das Dashboard fragt daraus Stunden- und Tageswerte ab
-- Auto-Auflösung: 15 Minuten für kurze aktuelle Bereiche, Stunden für mittlere Bereiche bis standardmäßig 730 Tage, ansonsten Tage; Stunden können im Dashboard für die letzten zwei Jahre explizit gewählt werden
-- bei HA-Ausfall wird keine Energie erfunden; die Datenabdeckung des Zeitfensters sinkt entsprechend
+1. HACS öffnen.
+2. Menü → **Benutzerdefinierte Repositories**.
+3. `https://github.com/SynAck91/WattWer` eintragen.
+4. Kategorie **Integration** wählen.
+5. WattWer installieren.
+6. Home Assistant neu starten.
+7. Unter **Einstellungen → Geräte & Dienste → Integration hinzufügen** nach **WattWer** suchen.
 
-Die kumulativen Energie-Sensoren haben `device_class: energy` und `state_class: total_increasing`. Home Assistant erzeugt daraus die langfristigen Statistikreihen. Die stündlichen LTS selbst werden von Home Assistant dauerhaft gehalten; für sehr alte Ansichten verwendet das mitgelieferte Dashboard standardmäßig Tagesaggregation.
+## Ersteinrichtung
 
-## Installation auf Home Assistant OS
+Für eine neue Installation werden nur generische Messquellen verlangt:
 
-1. Ordner `custom_components/pv_energy_allocation` nach `/config/custom_components/pv_energy_allocation` kopieren.
-2. Home Assistant neu starten.
-3. **Einstellungen → Geräte & Dienste → Integration hinzufügen** öffnen.
-4. Nach **PV-Energiezuordnung** suchen und hinzufügen.
-5. Die vorausgefüllten Entitäten kontrollieren und speichern.
-6. In der Sidebar erscheint automatisch **PV-Verteilung**.
+- Netzbezug-Leistung
+- Netzeinspeisung-Leistung
+- mindestens ein Verbraucher-Leistungssensor
 
-Es sind keine YAML-Helper, Utility Meter, Automationen, HACS-Karten oder Recorder-Ausschlüsse erforderlich.
+Optional können bereits PV-Erzeuger, Hintergrundlasten, ein Diagnose-Summensensor und Batterie-Leistungssensoren gewählt werden. Weitere Verbraucher und PV-Erzeuger lassen sich anschließend über das WattWer-Zahnrad konfigurieren.
 
-## Nach der Installation prüfen
+## PV-Erzeuger
 
-- nachts ohne PV: Netzanteil nahe 100 %
-- bei sicherer Netzeinspeisung ohne Batterie: Netzanteil 0 %
-- `Energiebilanzfehler Ø letzte 15 min` sollte langfristig um 0 W liegen
-- `strom_gesamt Abweichung Ø letzte 15 min` sollte um 0 W liegen; dieser Wert überprüft die bestehende Template-Summe gegen die direkt gesampelten Rohverbraucher
-- Datenabdeckung sollte möglichst nahe 100 % liegen
+Jeder PV-Erzeuger besitzt eine stabile interne ID und kann unabhängig bearbeitet werden:
 
-## Wichtige Einschränkung
+- Anzeigename
+- primärer Leistungssensor
+- optionaler Fallback-Sensor
+- aktiv/deaktiviert
+- MDI-Icon
+- maximales Sensoralter
+- Nacht-Fallback auf 0 W
+- Einbindung am **gemeinsamen Hauptbus** oder **lokal bei einem Verbraucher**
 
-Die Aufteilung paralleler Verbraucher auf gemeinsame Quellen ist außerhalb des lokal messbaren FW/BKW-Zweiges keine physikalisch eindeutige Elektronenzuordnung. Die Integration verwendet deshalb den zeitgleichen Quellenmix als neutrale Zuordnungsregel.
+Beim Wechsel eines Wechselrichters sollte der bestehende PV-Erzeuger bearbeitet und nur seine Entity geändert werden. Dadurch bleibt die Konfigurationshistorie konsistent.
 
-## Historische Daten vor Installation
+## Update von WattWer 0.1–0.4
 
-Die Integration beginnt beim ersten Start mit der eigenen Zeitreihe. Ein automatisches Rückrechnen alter 5-Sekunden-Leistungswerte aus dem Recorder ist in Version 0.1.0 nicht enthalten.
+WattWer 0.5.0 enthält eine automatische Migration.
+
+**Wichtig: Die bestehende Integration vor dem Update nicht löschen.**
+
+Beim Upgrade bleiben erhalten:
+
+- Domain `pv_energy_allocation`
+- bestehender Config Entry
+- bestehende Verbraucher-IDs
+- bestehende Entity `unique_id`s
+- Lifetime-Energiezähler
+- Recorder-Historie
+- Long-Term Statistics
+- Gruppen
+- Backfill-Archiv
+
+Die bisherige feste PV-Konfiguration wird automatisch in das neue allgemeine Erzeuger-Modell übernommen. Alte Konfigurationsfelder bleiben intern als Rollback-Kompatibilität gespeichert, werden aber von der neuen Logik nicht mehr als Defaults verwendet.
+
+## Datensicherheit bei Änderungen
+
+Verbraucher werden nicht hart gelöscht, sondern können deaktiviert werden. Name, Icon und Mess-Entity können geändert werden, ohne die stabile interne Verbraucher-ID zu ändern.
+
+Gruppen erzeugen keine neuen Messwerte und buchen keine Historie um. Gruppenwerte sind Summen ihrer Mitglieder.
+
+## Backfill
+
+WattWer kann historische Leistungsmessungen aus dem Home-Assistant-Recorder nachträglich integrieren. Die Genauigkeit hängt davon ab, welche Rohzustände noch vorhanden sind. Historische Recorder-Daten können insbesondere nicht immer rekonstruieren, ob ein Sensor bei unverändertem Wert regelmäßig erneut berichtet hat.
+
+Backfill-Daten werden deshalb separat gekennzeichnet und nicht als künstlicher Sprung in die aktuellen Lifetime-Zähler geschrieben.
+
+## Batterie
+
+Für die Batteriezuordnung müssen Lade- und Entladeleistung gemeinsam konfiguriert sein. Batterieentladung wird als eigene Quelle geführt und nicht automatisch als PV umetikettiert.
+
+Sobald Batteriebetrieb aktiv ist, wird die PV-Erzeugungsmessung für die saubere Trennung von PV und Batterie deutlich wichtiger. Fehlende Erzeugermessungen werden daher im Batteriemodus konservativer behandelt.
+
+## Support
+
+Fehler und Feature-Wünsche: https://github.com/SynAck91/WattWer/issues
+
+## Lizenz
+
+MIT

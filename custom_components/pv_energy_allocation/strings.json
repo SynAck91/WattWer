@@ -1,0 +1,42 @@
+{
+  "title": "WattWer",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up WattWer",
+        "description": "Select the grid meter and one initial consumer. Additional consumers and PV generators can be added later in WattWer's configuration panel.",
+        "data": {
+          "grid_import": "Grid import power",
+          "grid_export": "Grid export power",
+          "first_consumer": "First consumer power sensor",
+          "initial_pv_generators": "Initial PV generators (optional)",
+          "house_net": "Optional diagnostic net/sum sensor",
+          "background_loads": "Background loads (optional)",
+          "battery_charge": "Battery charge power (optional)",
+          "battery_discharge": "Battery discharge power (optional)",
+          "sample_interval": "Sample interval (s)",
+          "max_age": "Maximum sensor age (s)",
+          "deadband": "Deadband (W)",
+          "quarter_retention_days": "15-minute auto resolution (days)",
+          "hour_retention_days": "Hourly auto resolution (days)"
+        }
+      }
+    },
+    "error": {
+      "battery_pair_required": "Battery charge and discharge sensors must be configured together.",
+      "battery_requires_generator": "Configure at least one PV generator before enabling battery allocation.",
+      "source_overlap": "The same entity cannot be used simultaneously as grid source, consumer, PV generator or background load."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one WattWer instance is allowed."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WattWer options",
+        "description": "Use the WattWer configuration panel at {path} for the full visual editor."
+      }
+    }
+  }
+}

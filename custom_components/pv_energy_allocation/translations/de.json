@@ -1,0 +1,42 @@
+{
+  "title": "WattWer",
+  "config": {
+    "step": {
+      "user": {
+        "title": "WattWer einrichten",
+        "description": "Wähle den Netzanschlusspunkt und einen ersten Verbraucher. Weitere Verbraucher und PV-Erzeuger können anschließend komfortabel in WattWer ergänzt werden.",
+        "data": {
+          "grid_import": "Netzbezug Leistung",
+          "grid_export": "Netzeinspeisung Leistung",
+          "first_consumer": "Erster Verbraucher – Leistungssensor",
+          "initial_pv_generators": "PV-Erzeuger zum Start (optional)",
+          "house_net": "Netto-/Summensensor für Diagnose (optional)",
+          "background_loads": "Hintergrundlasten (optional)",
+          "battery_charge": "Batterie-Ladeleistung (optional)",
+          "battery_discharge": "Batterie-Entladeleistung (optional)",
+          "sample_interval": "Abtastintervall in Sekunden",
+          "max_age": "Maximales Sensoralter in Sekunden",
+          "deadband": "Nullschwelle in Watt",
+          "quarter_retention_days": "15-Minuten-Autoauflösung (Tage)",
+          "hour_retention_days": "Stunden-Autoauflösung (Tage)"
+        }
+      }
+    },
+    "error": {
+      "battery_pair_required": "Batterie-Lade- und Entladesensor müssen gemeinsam konfiguriert werden.",
+      "battery_requires_generator": "Vor Aktivierung der Batteriezuordnung muss mindestens ein PV-Erzeuger konfiguriert sein.",
+      "source_overlap": "Dieselbe Entity darf nicht gleichzeitig als Netzquelle, Verbraucher, PV-Erzeuger oder Hintergrundlast verwendet werden."
+    },
+    "abort": {
+      "single_instance_allowed": "WattWer kann nur einmal eingerichtet werden."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "WattWer Optionen",
+        "description": "Für die vollständige grafische Konfiguration verwende das WattWer-Konfigurationspanel unter {path}."
+      }
+    }
+  }
+}

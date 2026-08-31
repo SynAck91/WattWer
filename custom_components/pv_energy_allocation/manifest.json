@@ -1,0 +1,12 @@
+{
+  "domain": "pv_energy_allocation",
+  "name": "WattWer",
+  "version": "0.5.0",
+  "config_flow": true,
+  "single_config_entry": true,
+  "integration_type": "service",
+  "documentation": "https://github.com/SynAck91/WattWer",
+  "issue_tracker": "https://github.com/SynAck91/WattWer/issues",
+  "codeowners": ["@SynAck91"],
+  "dependencies": ["http", "panel_custom", "websocket_api", "recorder"]
+}
