@@ -5,7 +5,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "pv_energy_allocation"  # Never change: keeps existing Config Entries/entities.
 NAME = "WattWer"
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 PLATFORMS = [Platform.SENSOR]
 
 # Core metering configuration.

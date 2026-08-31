@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+### Dokumentation / Support
+
+- Buy Me a Coffee-Link zur README hinzugefügt.
+- Versionsnummer auf 0.5.1 aktualisiert.
+- Keine Änderungen an Domain, Config Entry, internen Verbraucher-IDs oder Statistik-IDs. Bestehende Messdaten bleiben beim Update erhalten.
+
 ## 0.5.0
 
 ### Allgemeine öffentliche Version
