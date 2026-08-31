@@ -15,6 +15,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
     this._lastView = null;
     this._management = null;
     this._backfillStatus = null;
+    this._storageStats = null;
   }
 
   set hass(value) {
@@ -105,6 +106,14 @@ class PVEnergyAllocationPanel extends HTMLElement {
         .members label { flex-direction:row; align-items:center; font-size:13px; }
         .notice { padding:11px 13px; border-radius:10px; background:var(--secondary-background-color); color:var(--secondary-text-color); line-height:1.45; }
         .progress { margin-top:12px; white-space:pre-wrap; font-family:monospace; font-size:12px; background:var(--secondary-background-color); padding:12px; border-radius:10px; }
+        .storagecard { margin-top:16px; padding:16px; }
+        .storagehead { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:14px; }
+        .storagehead h3 { margin:0; font-size:16px; }
+        .storagegrid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:10px; }
+        .storagebox { padding:12px; border-radius:12px; background:var(--secondary-background-color); min-width:0; }
+        .storagebox .kicker { font-size:11px; color:var(--secondary-text-color); margin-bottom:5px; }
+        .storagebox .big { font-size:20px; font-weight:650; }
+        .storagebox .small { margin-top:5px; font-size:12px; color:var(--secondary-text-color); line-height:1.45; }
         @media (max-width:900px) { .main { grid-template-columns:1fr; } .page{padding:12px;} .hero{align-items:flex-start;flex-direction:column;} .consumerrow{grid-template-columns:36px 1fr;}.consumerrow.header{display:none;} .consumerrow > *:nth-child(n+3){grid-column:2;} }
       </style>
       <div class="page">
@@ -182,10 +191,12 @@ class PVEnergyAllocationPanel extends HTMLElement {
     if (showLoading) this.shadowRoot.getElementById("status").textContent = "Lade Daten …";
     try {
       const {start,end} = this._range();
-      const [history, summary] = await Promise.all([
+      const [history, summary, storageStats] = await Promise.all([
         this._hass.callWS({type:"pv_energy_allocation/history", start:start.getTime(), end:end.getTime(), resolution:this._resolution}),
-        this._hass.callWS({type:"pv_energy_allocation/summary"})
+        this._hass.callWS({type:"pv_energy_allocation/summary"}),
+        this._hass.callWS({type:"pv_energy_allocation/storage/status"}).catch(() => null)
       ]);
+      this._storageStats = storageStats;
       // Always obtain today's completed quarter-hours separately when the
       // selected range includes today. Those records are the authoritative
       // merged Live + Backfill basis for the summary cards, independent of
@@ -365,10 +376,34 @@ class PVEnergyAllocationPanel extends HTMLElement {
           ${live.quality_notes?.length ? `<p class="muted">${live.quality_notes.map(x=>this._escape(x)).join(" · ")}</p>`:""}
           ${!live.valid && live.stale_entities?.length ? `<p class="muted">Ungültig/veraltet: ${live.stale_entities.map(x=>this._escape(x)).join(", ")}</p>`:""}
         </div>
-      </div>`;
+      </div>
+      ${this._storageStats ? this._storagePanel(this._storageStats) : ""}`;
 
     const selector = this.shadowRoot.getElementById("consumerSelect");
     if (selector) selector.addEventListener("change", e => { this._selectedDisplay=e.target.value; this._renderCurrent(); });
+  }
+
+  _storagePanel(stats) {
+    const bf=stats.backfill||{};
+    const counts=bf.counts||{}; const oldest=bf.oldest||{};
+    const retention=stats.recorder_keep_days==null ? "–" : `${stats.recorder_keep_days} Tage`;
+    const saveEvery=Math.max(1,Number(stats.storage_save_interval_seconds||300)/60);
+    const writeUpper=Number(stats.estimated_runtime_write_bytes_per_day_upper||0);
+    const fmtOldest=(value)=>value?this._dateOnly(value):"–";
+    return `<div class="card storagecard">
+      <div class="storagehead"><div><h3>Speicher & Statistik</h3><div class="muted">WattWer persistiert keine 5-Sekunden-Zwischensamples. Angezeigt werden die tatsächlichen WattWer-Dateigrößen und konservative Obergrenzen.</div></div></div>
+      <div class="storagegrid">
+        <div class="storagebox"><div class="kicker">WattWer .storage gesamt</div><div class="big">${this._bytes(stats.total_storage_bytes)}</div><div class="small">Runtime ${this._bytes(stats.runtime_storage_bytes)} · Backfill ${this._bytes(stats.backfill_storage_bytes)}</div></div>
+        <div class="storagebox"><div class="kicker">Persistenz-Intervall</div><div class="big">${saveEvery.toFixed(saveEvery%1?1:0)} min</div><div class="small">Zusätzlich sofort nach jeder abgeschlossenen Viertelstunde und beim Herunterfahren. Max. ~${Number(stats.max_runtime_saves_per_day||0)} Runtime-Saves/Tag.</div></div>
+        <div class="storagebox"><div class="kicker">Logisches Runtime-Schreibvolumen</div><div class="big">≤ ${this._bytes(writeUpper)}/Tag</div><div class="small">Konservative Obergrenze aus aktueller Runtime-Dateigröße × maximalen Saves. Dateisystem-/SQLite-Overhead nicht enthalten.</div></div>
+        <div class="storagebox"><div class="kicker">Home Assistant Recorder</div><div class="big">${retention}</div><div class="small">Normale State-Historie. Long-Term Statistics bleiben von der normalen Purge-Retention getrennt.</div></div>
+        <div class="storagebox"><div class="kicker">WattWer Entitäten</div><div class="big">${Number(stats.entity_count||0)}</div><div class="small">${Number(stats.consumer_count||0)} Verbraucher (${Number(stats.active_consumer_count||0)} aktiv) · ca. ${Number(stats.lts_series_count||0)} Long-Term-Statistics-Serien.</div></div>
+        <div class="storagebox"><div class="kicker">PV / Gruppen</div><div class="big">${Number(stats.active_generator_count||0)} / ${Number(stats.group_count||0)}</div><div class="small">Aktive PV-Erzeuger / Verbrauchergruppen. Insgesamt ${Number(stats.generator_count||0)} PV-Erzeuger konfiguriert.</div></div>
+        <div class="storagebox"><div class="kicker">Backfill 15 Minuten</div><div class="big">${Number(counts["15m"]||0)} Intervalle</div><div class="small">Ältester Datensatz ${fmtOldest(oldest["15m"])} · Aufbewahrung ${Number(stats.quarter_retention_days||0)} Tage.</div></div>
+        <div class="storagebox"><div class="kicker">Backfill Stunden</div><div class="big">${Number(counts.hour||0)} Stunden</div><div class="small">Ältester Datensatz ${fmtOldest(oldest.hour)} · Aufbewahrung ${Number(stats.hour_retention_days||0)} Tage.</div></div>
+        <div class="storagebox"><div class="kicker">Backfill Tage</div><div class="big">${Number(counts.day||0)} Tage</div><div class="small">Ältester Datensatz ${fmtOldest(oldest.day)} · Tagesaggregate werden dauerhaft im WattWer-Backfill-Archiv gehalten.</div></div>
+      </div>
+    </div>`;
   }
 
   _addValues(target, values) {
@@ -624,6 +659,8 @@ class PVEnergyAllocationPanel extends HTMLElement {
   _w(v){return v==null?"–":`${Number(v).toFixed(1)} W`;}
   _energy(kwh){kwh=Number(kwh||0);return kwh<1?`${(kwh*1000).toFixed(kwh<.1?1:0)} Wh`:`${kwh.toFixed(kwh<10?3:2)} kWh`;}
   _energyShort(kwh){kwh=Number(kwh||0);return kwh<1?`${Math.round(kwh*1000)}Wh`:`${kwh.toFixed(1)}kWh`;}
+  _bytes(value){const n=Math.max(0,Number(value||0));if(n<1024)return `${Math.round(n)} B`;if(n<1048576)return `${(n/1024).toFixed(n<10240?1:0)} KB`;if(n<1073741824)return `${(n/1048576).toFixed(n<10485760?1:0)} MB`;return `${(n/1073741824).toFixed(2)} GB`;}
+  _dateOnly(ms){return new Intl.DateTimeFormat(undefined,{dateStyle:"medium"}).format(new Date(Number(ms)));}
   _dateTime(ms){return new Intl.DateTimeFormat(undefined,{dateStyle:"short",timeStyle:"short"}).format(new Date(ms));}
   _axisLabel(ms,res){const d=new Date(ms);if(res==="15m"||res==="hour")return new Intl.DateTimeFormat(undefined,{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}).format(d);return new Intl.DateTimeFormat(undefined,{day:"2-digit",month:"2-digit",year:"2-digit"}).format(d);}
   _escape(s){return String(s).replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[c]));}

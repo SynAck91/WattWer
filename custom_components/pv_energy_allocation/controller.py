@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
+import asyncio
 import logging
 import math
 from typing import Any
@@ -110,6 +111,9 @@ class PVAllocationController:
         )
         self._listeners: list[Callable[[], None]] = []
         self._unsubs: list[Callable[[], None]] = []
+        self._save_lock = asyncio.Lock()
+        self._save_task: asyncio.Task[None] | None = None
+        self._dirty = False
         self._last_sample_ts: float | None = None
         self._last_allocation: dict[str, dict[str, float]] | None = None
         self._last_diag: dict[str, Any] = {
@@ -255,20 +259,50 @@ class PVAllocationController:
         return bucket
 
     async def async_stop(self) -> None:
-        """Stop timers and persist state."""
+        """Stop timers and persist any state that changed since the last save."""
         for unsub in self._unsubs:
             try:
                 unsub()
             except Exception:  # pragma: no cover - defensive cleanup
                 pass
         self._unsubs.clear()
-        await self._store.async_save(self._serialize())
+        if self._save_task is not None and not self._save_task.done():
+            try:
+                await self._save_task
+            except Exception:  # pragma: no cover - final save below retries
+                pass
+        await self._async_save_state()
 
     async def _async_on_stop(self, _event: Event) -> None:
-        await self._store.async_save(self._serialize())
+        await self._async_save_state()
 
     async def _async_periodic_save(self, _now: datetime) -> None:
-        await self._store.async_save(self._serialize())
+        # Runtime state is intentionally persisted only every five minutes.
+        # Quarter-hour closes schedule an immediate save separately.
+        await self._async_save_state()
+
+    async def _async_save_state(self) -> None:
+        """Persist a coherent runtime snapshot only when something changed."""
+        async with self._save_lock:
+            if not self._dirty:
+                return
+            payload = self._serialize()
+            # Clear before awaiting I/O. If a sample changes state while the save
+            # is in progress, _advance_interval() sets _dirty again and that
+            # newer state will be written by the next scheduled/quarter save.
+            self._dirty = False
+            try:
+                await self._store.async_save(payload)
+            except Exception:
+                self._dirty = True
+                raise
+
+    @callback
+    def _schedule_save(self) -> None:
+        """Schedule an immediate non-blocking save, coalescing duplicates."""
+        if self._save_task is not None and not self._save_task.done():
+            return
+        self._save_task = self.hass.async_create_task(self._async_save_state())
 
     async def _async_tick(self, now: datetime) -> None:
         now_utc = dt_util.as_utc(now)
@@ -755,6 +789,8 @@ class PVAllocationController:
         allocation: dict[str, dict[str, float]] | None,
         diag: dict[str, Any] | None,
     ) -> None:
+        if end > start:
+            self._dirty = True
         cursor = start
         while cursor < end - 1e-9:
             q_end = self.bucket_15m["start"] + 900.0
@@ -827,7 +863,11 @@ class PVAllocationController:
             record = self._record_from_bucket(self.bucket_15m, 900.0)
             self.last_15m = record
             self.bucket_15m = _new_bucket(self.bucket_15m["start"] + 900.0, self.all_consumers)
+            self._dirty = True
             self._notify()
+            # A completed billing interval is important enough to persist
+            # immediately instead of waiting for the next five-minute save.
+            self._schedule_save()
             return
         if resolution == "hour":
             self.bucket_hour = _new_bucket(self.bucket_hour["start"] + 3600.0, self.all_consumers)

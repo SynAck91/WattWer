@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.4
+
+- Interner WattWer-Runtime-Zustand wird nur noch alle 5 Minuten gespeichert statt jede Minute.
+- Abgeschlossene 15-Minuten-Fenster lösen weiterhin sofort eine persistente Speicherung aus.
+- Beim Herunterfahren wird ein noch nicht gespeicherter Runtime-Zustand weiterhin geschrieben.
+- Doppelte/unnötige Speichervorgänge werden über Dirty-State und Save-Coalescing vermieden.
+- Neuer Dashboard-Bereich **Speicher & Statistik** mit tatsächlichen WattWer-Dateigrößen, konservativer Schreiblast-Schätzung, Recorder-Retention, Entitäts-/LTS-Anzahl sowie Backfill-Anzahl und ältesten Archivzeitpunkten.
+- Keine Änderung an Domain, Config Entry, Verbraucher-IDs oder Statistik-Unique-IDs.
+
 ## 0.5.3
 
 - Dashboard-Summenkarten verwenden für den heutigen Zeitraum jetzt dieselbe zusammengeführte 15-Minuten-Datenbasis wie der Verlauf.

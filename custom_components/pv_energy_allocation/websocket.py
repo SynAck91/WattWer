@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import math
+import os
 from typing import Any
 
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
+from homeassistant.components.recorder import get_instance as get_recorder_instance
 from homeassistant.core import HomeAssistant, callback
 
 from .backfill import BackfillArchive, async_run_backfill
@@ -31,6 +34,7 @@ from .const import (
     GENERATOR_ROLE_DIRECT_CONSUMER,
     GENERATOR_ROLE_MAIN_BUS,
     GENERATOR_ROLES,
+    STORAGE_SAVE_INTERVAL,
     VERSION,
 )
 from .controller import PVAllocationController
@@ -63,6 +67,7 @@ def async_setup_websocket(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_update_config)
     websocket_api.async_register_command(hass, ws_update_settings)
     websocket_api.async_register_command(hass, ws_backfill_status)
+    websocket_api.async_register_command(hass, ws_storage_status)
     websocket_api.async_register_command(hass, ws_backfill)
 
 
@@ -302,6 +307,98 @@ def ws_backfill_status(hass: HomeAssistant, connection: websocket_api.ActiveConn
     result = _archive(controller).status()
     result["can_run"] = bool(connection.user and connection.user.is_admin)
     connection.send_result(msg["id"], result)
+
+
+@websocket_api.websocket_command({vol.Required("type"): f"{DOMAIN}/storage/status"})
+@websocket_api.async_response
+async def ws_storage_status(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return lightweight storage/statistics diagnostics for the dashboard."""
+    controller = _controller(hass)
+    if controller is None:
+        connection.send_error(msg["id"], "not_loaded", "WattWer is not loaded")
+        return
+
+    archive = _archive(controller)
+    runtime_path = hass.config.path(".storage", f"{DOMAIN}.{controller.entry.entry_id}")
+    backfill_path = hass.config.path(".storage", f"{DOMAIN}.backfill.{controller.entry.entry_id}")
+
+    def _size_sync(path: str) -> int:
+        try:
+            return max(0, int(os.path.getsize(path)))
+        except OSError:
+            return 0
+
+    def _edge(records: dict[str, Any], newest: bool = False) -> int | None:
+        if not records:
+            return None
+        try:
+            values = [int(key) for key in records]
+        except (TypeError, ValueError):
+            return None
+        return max(values) if newest else min(values)
+
+    consumer_count = len(controller.consumer_labels)
+    active_consumer_count = len(controller.consumers)
+    source_count = 4 if controller.battery_visible else 3
+    share_count = source_count - 1
+    # Mirrors sensor.py: two energy sensors per source, one share sensor for
+    # each non-total source, plus four integration-wide diagnostic sensors.
+    entity_count = consumer_count * (2 * source_count + share_count) + 4
+    # Long-term statistics are produced by lifetime energy sensors plus the
+    # monotonically increasing lifetime coverage sensor.
+    lts_series_count = consumer_count * source_count + 1
+
+    runtime_bytes = await hass.async_add_executor_job(_size_sync, runtime_path)
+    backfill_bytes = await hass.async_add_executor_job(_size_sync, backfill_path)
+    periodic_saves_per_day = math.ceil(86400 / max(1, STORAGE_SAVE_INTERVAL))
+    quarter_saves_per_day = 96
+    max_runtime_saves_per_day = periodic_saves_per_day + quarter_saves_per_day
+
+    try:
+        recorder_keep_days = int(get_recorder_instance(hass).keep_days)
+    except Exception:  # pragma: no cover - recorder may be unavailable during startup
+        recorder_keep_days = None
+
+    records = archive.records
+    connection.send_result(
+        msg["id"],
+        {
+            "runtime_storage_bytes": runtime_bytes,
+            "backfill_storage_bytes": backfill_bytes,
+            "total_storage_bytes": runtime_bytes + backfill_bytes,
+            "storage_save_interval_seconds": STORAGE_SAVE_INTERVAL,
+            "periodic_saves_per_day": periodic_saves_per_day,
+            "quarter_saves_per_day": quarter_saves_per_day,
+            "max_runtime_saves_per_day": max_runtime_saves_per_day,
+            "estimated_runtime_write_bytes_per_day_upper": runtime_bytes * max_runtime_saves_per_day,
+            "consumer_count": consumer_count,
+            "active_consumer_count": active_consumer_count,
+            "generator_count": len(controller.all_generators),
+            "active_generator_count": len(controller.generators),
+            "group_count": len(controller.groups),
+            "entity_count": entity_count,
+            "lts_series_count": lts_series_count,
+            "recorder_keep_days": recorder_keep_days,
+            "quarter_retention_days": controller.q_retention_days,
+            "hour_retention_days": controller.h_retention_days,
+            "backfill": {
+                "counts": {resolution: len(values) for resolution, values in records.items()},
+                "oldest": {resolution: _edge(values) for resolution, values in records.items()},
+                "newest": {resolution: _edge(values, True) for resolution, values in records.items()},
+                "revision_count": len(archive.config_revisions),
+            },
+            "policy": {
+                "periodic_minutes": STORAGE_SAVE_INTERVAL / 60,
+                "save_on_quarter_close": True,
+                "save_on_shutdown": True,
+                "five_second_samples_persisted": False,
+            },
+        },
+    )
 
 
 @websocket_api.require_admin

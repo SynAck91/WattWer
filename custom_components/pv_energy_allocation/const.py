@@ -5,7 +5,7 @@ from homeassistant.const import Platform
 
 DOMAIN = "pv_energy_allocation"  # Never change: keeps existing Config Entries/entities.
 NAME = "WattWer"
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 PLATFORMS = [Platform.SENSOR]
 
 # Core metering configuration.
@@ -81,6 +81,6 @@ PANEL_STATIC_URL = "/pv_energy_allocation_static"
 
 STORAGE_VERSION = 1
 BACKFILL_STORAGE_VERSION = 1
-STORAGE_SAVE_INTERVAL = 60
+STORAGE_SAVE_INTERVAL = 300
 LIVE_DASHBOARD_REFRESH_SECONDS = 5
 MAX_BACKFILL_DAYS_PER_RUN = 31

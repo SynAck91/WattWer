@@ -1,7 +1,7 @@
 {
   "domain": "pv_energy_allocation",
   "name": "WattWer",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "config_flow": true,
   "single_config_entry": true,
   "integration_type": "service",
