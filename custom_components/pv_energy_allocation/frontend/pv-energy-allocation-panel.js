@@ -530,12 +530,12 @@ class PVEnergyAllocationPanel extends HTMLElement {
       const last=this._backfillStatus.last;
       const host=this.shadowRoot.getElementById("modalHost");
       host.innerHTML=`<div class="modalback"><div class="modal" style="max-width:760px">
-        <div class="modalhead"><div><h2>Historische Daten nachrechnen</h2><div class="muted">Rekonstruktion aus vorhandenen Recorder-Rohzuständen</div></div><button id="closeModal">Schließen</button></div>
+        <div class="modalhead"><div><h2>Historische Daten nachrechnen</h2><div class="muted">Rekonstruktion aus vorhandenen Recorder-Rohzuständen · das laufende Viertel wird automatisch ausgelassen</div></div><button id="closeModal">Schließen</button></div>
         <div class="modalbody">
           <div class="notice">Es können nur Zeiträume rekonstruiert werden, für die die benötigten Roh-Leistungssensoren noch im Recorder vorhanden sind. Wiederholte identische Sensormeldungen sind historisch nicht vollständig nachweisbar; Backfill-Daten erhalten deshalb eine eigene Abdeckungskennzeichnung. Der Vorgang verändert keine bereits gemessenen Live-Zähler.</div>
           <div class="toolbar" style="box-shadow:none;margin:16px 0 0;padding:0;background:transparent">
             <label>Von<input id="bfStart" type="date" value="${this._localDateString(start)}"></label>
-            <label>Bis<input id="bfEnd" type="date" value="${this._localDateString(new Date(end.getTime()-86400000))}"></label>
+            <label>Bis<input id="bfEnd" type="date" value="${this._localDateString(end)}"></label>
           </div>
           <div class="diag">
             ${this._diagRow("Archiv 15 min", String(this._backfillStatus.counts?.["15m"]||0))}

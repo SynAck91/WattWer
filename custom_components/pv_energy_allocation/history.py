@@ -74,10 +74,23 @@ async def async_get_history(
     archived = archive.get_records(resolution, start_ms, end_ms)
     if archived:
         merged = {int(rec["start"]): rec for rec in archived}
-        # Native Recorder/LTS wins for overlapping intervals. Backfill exists
-        # mainly for time before installation and must never double-count.
+        # For overlapping intervals prefer the record with the better data
+        # coverage. This matters after a degraded/invalid live interval: native
+        # quarter sensors may legitimately contain a 0 kWh / 0 % coverage row,
+        # while a later Recorder backfill can reconstruct the same interval with
+        # much better coverage. Native data still wins when coverage is equal or
+        # better, so verified live measurements remain authoritative.
         for rec in records:
-            merged[int(rec["start"])] = rec
+            key = int(rec["start"])
+            existing = merged.get(key)
+            native_coverage = float(rec.get("coverage", 0.0) or 0.0)
+            archived_coverage = (
+                float(existing.get("coverage", 0.0) or 0.0)
+                if existing is not None
+                else -1.0
+            )
+            if existing is None or native_coverage >= archived_coverage:
+                merged[key] = rec
         records = [merged[key] for key in sorted(merged)]
 
     return {

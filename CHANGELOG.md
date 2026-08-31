@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2
+
+- Backfill-/Recorder-Zusammenführung korrigiert: Bei überlappenden Intervallen gewinnt jetzt der Datensatz mit der höheren Datenabdeckung.
+- Native Live-Daten bleiben bei gleicher oder besserer Abdeckung bevorzugt.
+- Behebt leere historische Viertelstunden, wenn zuvor 0-%-Live-Intervalle einen erfolgreich rekonstruierten Backfill überdeckt haben.
+- Backfill-Dialog schließt standardmäßig auch den heutigen Tag ein; das laufende Viertel wird weiterhin automatisch ausgeschlossen.
+- Keine Änderung an Domain, Config Entry, Verbraucher-IDs oder Statistik-Unique-IDs.
+
 ## 0.5.1
 
 ### Dokumentation / Support

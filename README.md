@@ -105,7 +105,7 @@ Beim Wechsel eines Wechselrichters sollte der bestehende PV-Erzeuger bearbeitet 
 
 ## Update von WattWer 0.1–0.4
 
-WattWer 0.5.1 enthält eine automatische Migration.
+WattWer 0.5.2 enthält weiterhin die automatische Migration aus älteren WattWer-Versionen.
 
 **Wichtig: Die bestehende Integration vor dem Update nicht löschen.**
 
@@ -252,7 +252,7 @@ When replacing an inverter or meter, edit the existing PV generator and change o
 
 ## Updating from WattWer 0.1–0.4
 
-WattWer 0.5.1 includes an automatic migration.
+WattWer 0.5.2 continues to include automatic migration from older WattWer versions.
 
 **Important: Do not delete the existing integration before updating.**
 
