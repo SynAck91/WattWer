@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3
+
+- Dashboard-Summenkarten verwenden für den heutigen Zeitraum jetzt dieselbe zusammengeführte 15-Minuten-Datenbasis wie der Verlauf.
+- Backfill-Werte mit besserer Datenabdeckung fließen dadurch auch in Gesamt-, PV- und Netz-kWh sowie Prozentwerte der Verbraucher und Gruppen ein.
+- Das aktuell laufende Viertel wird weiterhin nur einmal aus dem Live-Controller ergänzt.
+- Keine Änderung an Config Entry, Verbraucher-IDs oder Statistik-Unique-IDs.
+
 ## 0.5.2
 
 - Backfill-/Recorder-Zusammenführung korrigiert: Bei überlappenden Intervallen gewinnt jetzt der Datensatz mit der höheren Datenabdeckung.

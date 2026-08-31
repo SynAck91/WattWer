@@ -186,10 +186,24 @@ class PVEnergyAllocationPanel extends HTMLElement {
         this._hass.callWS({type:"pv_energy_allocation/history", start:start.getTime(), end:end.getTime(), resolution:this._resolution}),
         this._hass.callWS({type:"pv_energy_allocation/summary"})
       ]);
-      this._lastView = {history, summary, start, end};
+      // Always obtain today's completed quarter-hours separately when the
+      // selected range includes today. Those records are the authoritative
+      // merged Live + Backfill basis for the summary cards, independent of
+      // the chart resolution selected by the user.
+      const now = Date.now();
+      const includesToday = start.getTime() <= now && end.getTime() > Number(summary.today_start || now);
+      const todayHistory = includesToday
+        ? await this._hass.callWS({
+            type:"pv_energy_allocation/history",
+            start:Math.max(start.getTime(), Number(summary.today_start || start.getTime())),
+            end:Math.min(end.getTime(), now),
+            resolution:"15m"
+          })
+        : null;
+      this._lastView = {history, todayHistory, summary, start, end};
       const items = this._displayItems(history);
       if (!items.some(x => x.id === this._selectedDisplay)) this._selectedDisplay = items[0]?.id || "";
-      this._renderData(history, summary, start, end);
+      this._renderData(history, summary, start, end, todayHistory);
       this._setLiveStatus(history);
     } catch (err) {
       this.shadowRoot.getElementById("content").innerHTML = `<div class="error">${this._escape(String(err?.message || err))}</div>`;
@@ -213,7 +227,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
         return;
       }
       this._lastView.summary = summary;
-      this._renderData(this._lastView.history, summary, this._lastView.start, this._lastView.end);
+      this._renderData(this._lastView.history, summary, this._lastView.start, this._lastView.end, this._lastView.todayHistory);
       this._setLiveStatus(this._lastView.history);
     } catch (_err) {
       this.shadowRoot.getElementById("status").textContent = "Live-Aktualisierung gestört";
@@ -224,7 +238,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
     if (!this._lastView) return;
     const items = this._displayItems(this._lastView.history);
     if (!items.some(x => x.id === this._selectedDisplay)) this._selectedDisplay = items[0]?.id || "";
-    this._renderData(this._lastView.history, this._lastView.summary, this._lastView.start, this._lastView.end);
+    this._renderData(this._lastView.history, this._lastView.summary, this._lastView.start, this._lastView.end, this._lastView.todayHistory);
   }
 
   _setLiveStatus(history) {
@@ -258,7 +272,7 @@ class PVEnergyAllocationPanel extends HTMLElement {
     return out;
   }
 
-  _renderData(history, summary, start, end) {
+  _renderData(history, summary, start, end, todayHistory=null) {
     const totals = this._blank(history.consumers);
     let covered = 0, duration = 0;
     const todayStart = summary.today_start;
@@ -267,6 +281,9 @@ class PVEnergyAllocationPanel extends HTMLElement {
     const chartRecords = [];
 
     for (const rec of history.records) {
+      // Today's values are summed from a dedicated 15-minute merged history
+      // below. This prevents stale/invalid native rows from hiding repaired
+      // Backfill values in the summary cards.
       if (includesToday && rec.start >= todayStart) {
         if (history.resolution === "15m") chartRecords.push(rec);
         continue;
@@ -277,17 +294,33 @@ class PVEnergyAllocationPanel extends HTMLElement {
       chartRecords.push(rec);
     }
     if (includesToday) {
-      this._addValues(totals, summary.today);
-      const elapsed = Math.max(0, (Math.min(end.getTime(), now) - Math.max(start.getTime(), todayStart))/1000);
-      if (elapsed > 0) { covered += summary.today_coverage * elapsed; duration += elapsed; }
-      if (history.resolution === "15m" && summary.current_15m?.values) {
-        chartRecords.push({
-          start:summary.current_15m.start,
-          duration:Math.max(1,(now-summary.current_15m.start)/1000),
-          coverage:Math.min(1, summary.current_15m.coverage_seconds/Math.max(1,(now-summary.current_15m.start)/1000)),
-          values:summary.current_15m.values,
-          partial:true
-        });
+      const todayRecords = todayHistory?.records || [];
+      for (const rec of todayRecords) {
+        this._addValues(totals, rec.values);
+        covered += Number(rec.coverage || 0) * Number(rec.duration || 0);
+        duration += Number(rec.duration || 0);
+      }
+
+      // Add only the currently running quarter-hour from the live controller.
+      // Completed quarters above already contain the best Live/Backfill row.
+      if (summary.current_15m?.values) {
+        const partialStart = Number(summary.current_15m.start || now);
+        const partialDuration = Math.max(1, (Math.min(end.getTime(), now) - Math.max(start.getTime(), partialStart))/1000);
+        if (partialDuration > 0 && partialStart < end.getTime()) {
+          this._addValues(totals, summary.current_15m.values);
+          const partialCoverage = Math.min(1, Number(summary.current_15m.coverage_seconds || 0) / Math.max(1, (now-partialStart)/1000));
+          covered += partialCoverage * partialDuration;
+          duration += partialDuration;
+          if (history.resolution === "15m") {
+            chartRecords.push({
+              start:partialStart,
+              duration:partialDuration,
+              coverage:partialCoverage,
+              values:summary.current_15m.values,
+              partial:true
+            });
+          }
+        }
       }
     }
     const coveragePct = duration > 0 ? covered/duration*100 : 0;
